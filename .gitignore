@@ -1,0 +1,340 @@
+# Python
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+pythonenv*
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+static/
+mediafiles/
+
+# Database
+*.db
+*.sqlite3
+*.sqlite3-journal
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+.env.example
+.env.production
+.env.development
+*.env
+!.env.example
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/dataSources.ids
+.idea/dataSources.xml
+.idea/sqlDataSources.xml
+.idea/dynamic.xml
+.idea/uiDesigner.xml
+.idea/gradle.xml
+.idea/libraries
+.idea/misc.xml
+.idea/modules.xml
+.idea/runConfigurations.xml
+*.iml
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Python packages
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib64/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Testing
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
+.cache/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.testrepository/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+*.pid
+celeryd.pid
+celerybeat-schedule.db
+*.pid
+
+# Redis
+dump.rdb
+
+# Logs
+*.log
+logs/
+log/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Docker
+docker-compose.override.yml
+.dockerignore
+*.dockerignore
+
+# Node.js / Next.js (for your nextjs-integration)
+nextjs-integration/node_modules/
+nextjs-integration/.next/
+nextjs-integration/out/
+nextjs-integration/build/
+nextjs-integration/dist/
+nextjs-integration/.vercel/
+nextjs-integration/.cache/
+nextjs-integration/.env
+nextjs-integration/.env.local
+nextjs-integration/.env.production
+nextjs-integration/.env.development
+nextjs-integration/package-lock.json
+nextjs-integration/yarn.lock
+nextjs-integration/pnpm-lock.yaml
+nextjs-integration/npm-debug.log*
+nextjs-integration/yarn-debug.log*
+nextjs-integration/yarn-error.log*
+nextjs-integration/.next/
+
+# Static files collected by Django
+static/
+staticfiles/
+media/
+
+# Coverage reports
+.coverage
+htmlcov/
+
+# Python virtual environments
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Django migrations (optional - uncomment if you don't want to track migrations)
+# */migrations/
+# !*/migrations/__init__.py
+
+# Secret keys and sensitive data
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+credentials/
+*.secret
+*.token
+*.password
+
+# Backup files
+*.bak
+*.backup
+*.old
+*.orig
+
+# Development files
+*.sql
+*.dump
+*.psql
+
+# Editor files
+*.sublime-project
+*.sublime-workspace
+.project
+.classpath
+.settings/
+*.code-workspace
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# PyCharm
+.idea/
+*.iml
+out/
+.idea_modules/
+*.iws
+*.ipr
+
+# pytest
+.pytest_cache/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype
+.pytype/
+
+# Cython
+*.so
+
+# Profiling data
+.prof
+*.prof
+
+# Server
+/.serverless
+/.serverless_plugins
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Kubernetes
+*.kubeconfig
+*.k8s.yaml
+*.yml
+!k8s-deployment.yml
+
+# Sentry
+.sentryclirc
+
+# Django-tenants specific
+*.schema.sql
+tenant_*.sql
+schema_*.sql
+
+# Celery beat schedule
+celerybeat-schedule.db
+celerybeat-schedule
+
+# Redis dumps
+*.rdb
+
+# PostgreSQL dumps
+*.backup
+*.pgdump
+*.sql.gz
+
+# API documentation
+api-docs/
+apidocs/
+docs/_build/
+
+# Frontend build files (if not in nextjs-integration)
+build/
+dist/
+out/
+.nuxt/
+.cache/
+
+# Environment specific
+config.local.yml
+config.local.json
+development.yml
+production.yml
+staging.yml
+
+# Generated files
+*.generated.*
+*.gen.*
+*_pb2.py
+*_pb2_grpc.py
+
+# Coverage reports
+*.coverage
+coverage/
+htmlcov/
+
+# Database credentials
+*.db-credentials
+*.db-creds
+
+# SSH keys
+*.pem
+*.ppk
+*.pub
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+
+# SSL certificates
+*.crt
+*.cert
+*.key
+*.csr
+
+# AWS credentials
+.aws/
+credentials
+config
+
+# Google Cloud credentials
+*.json
+*.p12
+application_default_credentials.json
+
+# Azure credentials
+*.azureprofile
+*.azurerm
+
+# Docker volumes
+docker-data/
+postgres-data/
+redis-data/
+pgdata/
+
+# Local development overrides
+*-local.*
+*-dev.*
+*-override.*
