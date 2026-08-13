@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # LoanTrack - Multi-Tenant MFI Loan Management System
 
 A Django-based multi-tenant SaaS platform for Microfinance Institutions (MFIs) to manage loans, members, and reporting. Built with `django-tenants` for PostgreSQL schema-based isolation.
@@ -658,3 +659,7 @@ LoanTrack/
 - **Currency Conversion**: Exchange rates for multi-currency reporting
 - **Rate Limiting**: API throttling for security
 - **Next.js Ready**: REST API with CORS, cascading dropdowns, JWT auth
+=======
+# LoanTrack
+ A Django-based multi-tenant SaaS platform for Microfinance Institutions (MFIs) to manage loans, members, and reporting. Built with `django-tenants` for PostgreSQL schema-based isolation
+>>>>>>> a24970201df3625d56df68c647df00610874d2b0
