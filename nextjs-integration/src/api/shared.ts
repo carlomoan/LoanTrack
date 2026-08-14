@@ -82,6 +82,8 @@ export const sharedApi = {
       api.delete(`/users/${id}/`),
     me: () =>
       api.get<GlobalUser>('/users/me/'),
+    roles: () =>
+      api.get<{ value: string; label: string }[]>('/users/roles/'),
   },
 
   // Exchange Rates

@@ -34,9 +34,23 @@ export function useLogin() {
   return useMutation({
     mutationFn: authApi.login,
     onSuccess: async (response, variables) => {
+      // Set tokens FIRST so subsequent requests (like me()) have the Authorization header
+      const { setTokens: clientSetTokens, setTenantSchema } = await import('@/api/client');
+      clientSetTokens(response.data.access, response.data.refresh);
+      
       try {
         const userResponse = await authApi.me();
-        setAuth(response.data, userResponse.data);
+        const user = userResponse.data;
+        
+        // Set tenant schema for this user if they have an MFI
+        if (user.mfi_schema) {
+          setTenantSchema(user.mfi_schema);
+        } else if (user.mfi) {
+          // Fallback: try to get schema from MFI ID
+          setTenantSchema(`tenant_mfi${user.mfi}`);
+        }
+        
+        setAuth(response.data, user);
       } catch {
         setAuth(response.data, {
           ...FALLBACK_USER,
@@ -74,14 +88,38 @@ export function useUserProfile() {
   return query;
 }
 
-// ✅ THIS IS THE MISSING EXPORT
+// �������� THIS IS THE MISSING EXPORT
 export function useAuthBootstrap() {
   const hydrateAuth = useAuthStore((state) => state.hydrateAuth);
   const user = useAuthStore((state) => state.user);
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+  const accessToken = useAuthStore((state) => state.accessToken);
+  const refreshToken = useAuthStore((state) => state.refreshToken);
   const setUser = useAuthStore((state) => state.setUser);
 
-  useEffect(() => { hydrateAuth(); }, [hydrateAuth]);
+  // Hydrate auth and set up axios client synchronously
+  useEffect(() => {
+    hydrateAuth();
+    
+    // Set tokens and tenant schema in axios client immediately after hydration
+    if (accessToken && refreshToken) {
+      const { setTokens: clientSetTokens, setTenantSchema, getTenantSchema } = require('@/api/client');
+      clientSetTokens(accessToken, refreshToken);
+      
+      // Set tenant schema from user if available
+      if (user?.mfi_schema) {
+        setTenantSchema(user.mfi_schema);
+      } else if (user?.mfi) {
+        setTenantSchema(`tenant_mfi${user.mfi}`);
+      } else {
+        // Try to get from localStorage
+        const storedSchema = getTenantSchema();
+        if (storedSchema) {
+          setTenantSchema(storedSchema);
+        }
+      }
+    }
+  }, [hydrateAuth]);
 
   const query = useQuery({
     queryKey: queryKeys.auth.profile,

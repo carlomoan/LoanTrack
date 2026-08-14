@@ -18,4 +18,5 @@
 @layer components {
   .fuse-card { @apply bg-white rounded-2xl border border-slate-200/60 shadow-sm hover:shadow-md transition-shadow duration-200; }
   .fuse-btn-primary { @apply bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2.5 px-5 rounded-lg shadow-sm hover:shadow-md transition-all duration-200 flex items-center gap-2; }
+  .fuse-input { @apply bg-white border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent; }
 }

@@ -1,0 +1,1383 @@
+diff --git a/core/permissions.py b/core/permissions.py
+new file mode 100644
+index 0000000..3194434
+--- /dev/null
++++ b/core/permissions.py
+@@ -0,0 +1,391 @@
++"""
++Role-based authorization for LoanTrack's public/shared-schema endpoints.
++
++GlobalUser.role (see core.models.GlobalUser.Role) is the source of truth:
++
++    SUPER_ADMIN   full access to every Donor / AoM / MFI / report.
++    AOM_STAFF     scoped to their own AoM: that AoM's MFIs, MFI reports and
++                  AoM report. Can read the parent Donor but not edit it.
++    DONOR_STAFF   scoped to their own Donor: oversight/read access to the
++                  AoMs and MFIs funded by that donor, and the reports chain.
++                  Read-mostly by design -- donors oversee, they don't
++                  operate MFIs.
++    MFI_ADMIN     scoped to their own MFI record and its reports.
++    MFI_MANAGER   same scope as MFI_ADMIN, no user-management rights.
++    LOAN_OFFICER  same scope, read-only on the MFI/report records.
++
++Each permission class below is used two ways:
++    1. As a DRF `permission_classes` entry -- coarse allow/deny plus
++       per-object checks for retrieve/update/delete.
++    2. Its `scope_queryset()` classmethod is called from the view's
++       `get_queryset()` so list results are filtered up front rather than
++       relying on object-level checks to reject requests one at a time.
++
++These are deliberately conservative defaults built from the roles already
++modeled on GlobalUser. Adjust the exact business rules (e.g. whether
++AOM_STAFF can edit MFI records, or only view them) to match how you
++actually want the org hierarchy to operate -- the scoping mechanism itself
++is what matters, and it's centralized here so it's easy to change in one
++place.
++"""
++
++from rest_framework import permissions
++
++SUPER_ADMIN = "SUPER_ADMIN"
++AOM_STAFF = "AOM_STAFF"
++DONOR_STAFF = "DONOR_STAFF"
++MFI_ADMIN = "MFI_ADMIN"
++MFI_MANAGER = "MFI_MANAGER"
++LOAN_OFFICER = "LOAN_OFFICER"
++
++MFI_STAFF_ROLES = {MFI_ADMIN, MFI_MANAGER, LOAN_OFFICER}
++MFI_WRITE_ROLES = {MFI_ADMIN, MFI_MANAGER}
++
++SAFE_METHODS = permissions.SAFE_METHODS
++
++
++def get_role(request):
++    user = request.user
++    if not user or not user.is_authenticated:
++        return None
++    return getattr(user, "role", None)
++
++
++def is_super_admin(request):
++    return get_role(request) == SUPER_ADMIN
++
++
++class DonorPermission(permissions.BasePermission):
++    """
++    Donor rows. SUPER_ADMIN: full CRUD. DONOR_STAFF: read their own donor
++    only. Everyone else: no access -- donor identity/contact info is not
++    something an MFI-level or AoM-level user needs.
++    """
++
++    def has_permission(self, request, view):
++        role = get_role(request)
++        if role == SUPER_ADMIN:
++            return True
++        if role == DONOR_STAFF:
++            return request.method in SAFE_METHODS
++        return False
++
++    def has_object_permission(self, request, view, obj):
++        role = get_role(request)
++        if role == SUPER_ADMIN:
++            return True
++        if role == DONOR_STAFF:
++            return (
++                request.method in SAFE_METHODS
++                and obj.id == request.user.donor_id
++            )
++        return False
++
++    @classmethod
++    def scope_queryset(cls, request, queryset):
++        role = get_role(request)
++        if role == SUPER_ADMIN:
++            return queryset
++        if role == DONOR_STAFF:
++            return queryset.filter(id=request.user.donor_id)
++        return queryset.none()
++
++
++class AoMPermission(permissions.BasePermission):
++    """
++    AoM rows. SUPER_ADMIN: full CRUD. AOM_STAFF: read/write their own AoM.
++    DONOR_STAFF: read the AoMs their donor funds. MFI-level roles: no
++    access -- they don't need the AoM's own contact/admin record.
++    """
++
++    def has_permission(self, request, view):
++        role = get_role(request)
++        if role == SUPER_ADMIN:
++            return True
++        if role == AOM_STAFF:
++            return True
++        if role == DONOR_STAFF:
++            return request.method in SAFE_METHODS
++        return False
++
++    def has_object_permission(self, request, view, obj):
++        role = get_role(request)
++        if role == SUPER_ADMIN:
++            return True
++        if role == AOM_STAFF:
++            return obj.id == request.user.aom_id
++        if role == DONOR_STAFF:
++            return request.method in SAFE_METHODS and obj.donor_id == request.user.donor_id
++        return False
++
++    @classmethod
++    def scope_queryset(cls, request, queryset):
++        role = get_role(request)
++        if role == SUPER_ADMIN:
++            return queryset
++        if role == AOM_STAFF:
++            return queryset.filter(id=request.user.aom_id)
++        if role == DONOR_STAFF:
++            return queryset.filter(donor_id=request.user.donor_id)
++        return queryset.none()
++
++
++class MFIPermission(permissions.BasePermission):
++    """
++    MFI registry rows (public schema -- name, code, schema_name, contact
++    info, not the tenant's operational data). SUPER_ADMIN: full CRUD.
++    AOM_STAFF: read/write MFIs under their own AoM. DONOR_STAFF: read MFIs
++    they fund (directly or via the AoM). MFI-level roles: read their own
++    MFI record only.
++    """
++
++    def has_permission(self, request, view):
++        role = get_role(request)
++        if role in (SUPER_ADMIN, AOM_STAFF):
++            return True
++        if role == DONOR_STAFF or role in MFI_STAFF_ROLES:
++            return request.method in SAFE_METHODS
++        return False
++
++    def has_object_permission(self, request, view, obj):
++        role = get_role(request)
++        if role == SUPER_ADMIN:
++            return True
++        if role == AOM_STAFF:
++            return obj.aom_id == request.user.aom_id
++        if role == DONOR_STAFF:
++            return request.method in SAFE_METHODS and (
++                obj.donor_id == request.user.donor_id
++                or (obj.aom_id and obj.aom.donor_id == request.user.donor_id)
++            )
++        if role in MFI_STAFF_ROLES:
++            return request.method in SAFE_METHODS and obj.id == request.user.mfi_id
++        return False
++
++    @classmethod
++    def scope_queryset(cls, request, queryset):
++        role = get_role(request)
++        if role == SUPER_ADMIN:
++            return queryset
++        if role == AOM_STAFF:
++            return queryset.filter(aom_id=request.user.aom_id)
++        if role == DONOR_STAFF:
++            from django.db.models import Q
++
++            return queryset.filter(
++                Q(donor_id=request.user.donor_id)
++                | Q(aom__donor_id=request.user.donor_id)
++            )
++        if role in MFI_STAFF_ROLES:
++            return queryset.filter(id=request.user.mfi_id)
++        return queryset.none()
++
++
++class GlobalUserPermission(permissions.BasePermission):
++    """
++    Other GlobalUser accounts. SUPER_ADMIN: full CRUD. AOM_STAFF: read/write
++    accounts belonging to their own AoM or to MFIs under it (managing their
++    org's staff). DONOR_STAFF: read accounts under their donor. MFI_ADMIN:
++    read/write LOAN_OFFICER/MFI_MANAGER accounts at their own MFI (can't
++    create or edit another MFI_ADMIN). MFI_MANAGER/LOAN_OFFICER: read
++    accounts at their own MFI only.
++
++    Note: the separate `/me/` action bypasses this entirely and always
++    returns the caller's own record -- that's intentional and unrelated to
++    directory access.
++    """
++
++    def has_permission(self, request, view):
++        role = get_role(request)
++        return role is not None
++
++    def has_object_permission(self, request, view, obj):
++        role = get_role(request)
++        user = request.user
++
++        if role == SUPER_ADMIN:
++            return True
++        if obj.id == user.id:
++            return True  # always allowed to see/edit your own account here
++        if role == AOM_STAFF:
++            return obj.aom_id == user.aom_id or (
++                obj.mfi_id and obj.mfi.aom_id == user.aom_id
++            )
++        if role == DONOR_STAFF:
++            return request.method in SAFE_METHODS and (
++                obj.donor_id == user.donor_id
++                or (obj.aom_id and obj.aom.donor_id == user.donor_id)
++                or (obj.mfi_id and obj.mfi.donor_id == user.donor_id)
++            )
++        if role == MFI_ADMIN:
++            return obj.mfi_id == user.mfi_id and obj.role in {
++                MFI_MANAGER,
++                LOAN_OFFICER,
++            }
++        if role in (MFI_MANAGER, LOAN_OFFICER):
++            return request.method in SAFE_METHODS and obj.mfi_id == user.mfi_id
++        return False
++
++    @classmethod
++    def scope_queryset(cls, request, queryset):
++        role = get_role(request)
++        user = request.user
++        if role == SUPER_ADMIN:
++            return queryset
++        if role == AOM_STAFF:
++            from django.db.models import Q
++
++            return queryset.filter(
++                Q(aom_id=user.aom_id) | Q(mfi__aom_id=user.aom_id)
++            )
++        if role == DONOR_STAFF:
++            from django.db.models import Q
++
++            return queryset.filter(
++                Q(donor_id=user.donor_id)
++                | Q(aom__donor_id=user.donor_id)
++                | Q(mfi__donor_id=user.donor_id)
++            )
++        if role in MFI_STAFF_ROLES:
++            return queryset.filter(mfi_id=user.mfi_id)
++        return queryset.none()
++
++
++class DomainPermission(permissions.BasePermission):
++    """
++    Tenant domain routing rows. This is infrastructure config (which
++    hostname resolves to which tenant schema), not operational data --
++    keep it SUPER_ADMIN only.
++    """
++
++    def has_permission(self, request, view):
++        return is_super_admin(request)
++
++    def has_object_permission(self, request, view, obj):
++        return is_super_admin(request)
++
++    @classmethod
++    def scope_queryset(cls, request, queryset):
++        if is_super_admin(request):
++            return queryset
++        return queryset.none()
++
++
++class ExchangeRatePermission(permissions.BasePermission):
++    """
++    Exchange rates feed every report's currency conversion. Any
++    authenticated user may read them; only SUPER_ADMIN may write, since a
++    bad rate silently corrupts every downstream MFI/AoM/Donor report.
++    """
++
++    def has_permission(self, request, view):
++        if request.method in SAFE_METHODS:
++            return get_role(request) is not None
++        return is_super_admin(request)
++
++    def has_object_permission(self, request, view, obj):
++        if request.method in SAFE_METHODS:
++            return get_role(request) is not None
++        return is_super_admin(request)
++
++
++class ReportPermission(permissions.BasePermission):
++    """
++    Shared base for MFIReport / AoMReport / DonorReport. Subclasses supply
++    the field-name lookups needed to trace a report back to its
++    MFI/AoM/Donor owner from both a queryset (`scope_queryset`) and a
++    resolved object (`has_object_permission`).
++    """
++
++    # Overridden per subclass: kwargs for queryset.filter() keyed by role.
++    def owner_filter_kwargs(self, request):
++        raise NotImplementedError
++
++    def owns_object(self, request, obj):
++        raise NotImplementedError
++
++    def has_permission(self, request, view):
++        return get_role(request) is not None
++
++    def has_object_permission(self, request, view, obj):
++        role = get_role(request)
++        if role == SUPER_ADMIN:
++            return True
++        return self.owns_object(request, obj)
++
++    def scope_queryset(self, request, queryset):
++        role = get_role(request)
++        if role == SUPER_ADMIN:
++            return queryset
++        kwargs = self.owner_filter_kwargs(request)
++        if kwargs is None:
++            return queryset.none()
++        from django.db.models import Q
++
++        query = Q()
++        for kw in kwargs:
++            query |= Q(**kw)
++        return queryset.filter(query)
++
++
++class MFIReportPermission(ReportPermission):
++    def owner_filter_kwargs(self, request):
++        role = get_role(request)
++        user = request.user
++        if role == AOM_STAFF:
++            return [{"mfi__aom_id": user.aom_id}]
++        if role == DONOR_STAFF:
++            return [{"mfi__donor_id": user.donor_id}, {"mfi__aom__donor_id": user.donor_id}]
++        if role in MFI_STAFF_ROLES:
++            return [{"mfi_id": user.mfi_id}]
++        return None
++
++    def owns_object(self, request, obj):
++        role = get_role(request)
++        user = request.user
++        if role == AOM_STAFF:
++            return obj.mfi.aom_id == user.aom_id
++        if role == DONOR_STAFF:
++            return request.method in SAFE_METHODS and (
++                obj.mfi.donor_id == user.donor_id
++                or (obj.mfi.aom_id and obj.mfi.aom.donor_id == user.donor_id)
++            )
++        if role in MFI_STAFF_ROLES:
++            return obj.mfi_id == user.mfi_id
++        return False
++
++
++class AoMReportPermission(ReportPermission):
++    def owner_filter_kwargs(self, request):
++        role = get_role(request)
++        user = request.user
++        if role == AOM_STAFF:
++            return [{"aom_id": user.aom_id}]
++        if role == DONOR_STAFF:
++            return [{"aom__donor_id": user.donor_id}]
++        return None
++
++    def owns_object(self, request, obj):
++        role = get_role(request)
++        user = request.user
++        if role == AOM_STAFF:
++            return obj.aom_id == user.aom_id
++        if role == DONOR_STAFF:
++            return request.method in SAFE_METHODS and obj.aom.donor_id == user.donor_id
++        return False
++
++
++class DonorReportPermission(ReportPermission):
++    def owner_filter_kwargs(self, request):
++        role = get_role(request)
++        user = request.user
++        if role == DONOR_STAFF:
++            return [{"donor_id": user.donor_id}]
++        return None
++
++    def owns_object(self, request, obj):
++        role = get_role(request)
++        user = request.user
++        if role == DONOR_STAFF:
++            return obj.donor_id == user.donor_id
++        return False
+diff --git a/core/tests.py b/core/tests.py
+index 7ce503c..ae42b20 100644
+--- a/core/tests.py
++++ b/core/tests.py
+@@ -1,3 +1,189 @@
++"""
++Authorization tests for the shared-schema endpoints in core/views.py.
++
++Proves that GlobalUser.role actually restricts what a caller can see and
++do on Donor / AoM / MFI / GlobalUser / report endpoints, instead of every
++authenticated user seeing every organization's data.
++"""
++
++from django.contrib.auth import get_user_model
+ from django.test import TestCase
++from rest_framework import status
++from rest_framework.test import APIClient
++
++from .models import AoM, Domain, Donor, MFI, MFIReport
++
++User = get_user_model()
++
++
++class SharedSchemaScopingTests(TestCase):
++    def setUp(self):
++        # core.middleware.TenantHeaderMiddleware falls back to this record
++        # whenever a request carries no X-Tenant-Subdomain header (i.e.
++        # every request to a /api/<shared>/ endpoint). It must exist for
++        # any shared-schema view to resolve at all -- see setup_tenants.py.
++        public_tenant = MFI(
++            schema_name="public",
++            name="Public",
++            code="PUBLIC",
++            registration_number="PUBLIC-001",
++            email="admin@localhost",
++            phone="000",
++            address="Public schema",
++        )
++        public_tenant.auto_create_schema = False
++        public_tenant.save()
++        Domain.objects.create(
++            tenant=public_tenant, domain="testserver", is_primary=True
++        )
++
++        self.donor_1 = Donor.objects.create(
++            name="Donor One", contact_email="d1@example.com"
++        )
++        self.donor_2 = Donor.objects.create(
++            name="Donor Two", contact_email="d2@example.com"
++        )
++
++        self.aom_1 = AoM.objects.create(
++            name="AoM One", code="AOM1", donor=self.donor_1, contact_email="a1@example.com"
++        )
++        self.aom_2 = AoM.objects.create(
++            name="AoM Two", code="AOM2", donor=self.donor_2, contact_email="a2@example.com"
++        )
++
++        # These tests only exercise the public-schema ViewSets, not tenant
++        # data, so skip real CREATE SCHEMA / schema migration -- it isn't
++        # needed here and doesn't play well with TestCase's wrapping
++        # transaction.
++        self.mfi_1 = MFI(
++            name="MFI One",
++            registration_number="REG-1",
++            email="m1@example.com",
++            phone="000",
++            address="addr",
++            aom=self.aom_1,
++            schema_name="mfi_one_test",
++            code="MFI1TEST",
++        )
++        self.mfi_1.auto_create_schema = False
++        self.mfi_1.save()
++
++        self.mfi_2 = MFI(
++            name="MFI Two",
++            registration_number="REG-2",
++            email="m2@example.com",
++            phone="000",
++            address="addr",
++            aom=self.aom_2,
++            schema_name="mfi_two_test",
++            code="MFI2TEST",
++        )
++        self.mfi_2.auto_create_schema = False
++        self.mfi_2.save()
++
++        self.super_admin = User.objects.create_user(
++            username="super", password="pw", role=User.Role.SUPER_ADMIN
++        )
++        self.aom_1_staff = User.objects.create_user(
++            username="aom1_staff",
++            password="pw",
++            role=User.Role.AOM_STAFF,
++            aom=self.aom_1,
++        )
++        self.donor_1_staff = User.objects.create_user(
++            username="donor1_staff",
++            password="pw",
++            role=User.Role.DONOR_STAFF,
++            donor=self.donor_1,
++        )
++        self.mfi_1_officer = User.objects.create_user(
++            username="mfi1_officer",
++            password="pw",
++            role=User.Role.LOAN_OFFICER,
++            mfi=self.mfi_1,
++        )
++
++    def _client(self, user):
++        client = APIClient()
++        client.force_authenticate(user=user)
++        return client
++
++    # --- Donor: SUPER_ADMIN and the owning DONOR_STAFF only -------------
++
++    def test_loan_officer_cannot_list_donors(self):
++        response = self._client(self.mfi_1_officer).get("/api/donors/")
++        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
++
++    def test_donor_staff_only_sees_their_own_donor(self):
++        response = self._client(self.donor_1_staff).get("/api/donors/")
++        self.assertEqual(response.status_code, status.HTTP_200_OK)
++        names = [row["name"] for row in response.data["results"]]
++        self.assertEqual(names, [self.donor_1.name])
++
++    def test_donor_staff_cannot_edit_their_donor(self):
++        response = self._client(self.donor_1_staff).patch(
++            f"/api/donors/{self.donor_1.id}/", {"name": "Renamed"}
++        )
++        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
++
++    def test_super_admin_sees_all_donors(self):
++        response = self._client(self.super_admin).get("/api/donors/")
++        self.assertEqual(response.status_code, status.HTTP_200_OK)
++        self.assertEqual(response.data["count"], 2)
++
++    # --- MFI registry: AoM staff scoped to their own AoM -----------------
++
++    def test_aom_staff_only_sees_mfis_in_their_aom(self):
++        response = self._client(self.aom_1_staff).get("/api/mfis/")
++        self.assertEqual(response.status_code, status.HTTP_200_OK)
++        names = [row["name"] for row in response.data["results"]]
++        self.assertEqual(names, [self.mfi_1.name])
++
++    def test_aom_staff_cannot_edit_mfi_in_another_aom(self):
++        response = self._client(self.aom_1_staff).patch(
++            f"/api/mfis/{self.mfi_2.id}/", {"is_active": False}
++        )
++        self.assertIn(
++            response.status_code,
++            (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND),
++        )
++
++    def test_mfi_officer_only_sees_their_own_mfi_registry_row(self):
++        response = self._client(self.mfi_1_officer).get("/api/mfis/")
++        self.assertEqual(response.status_code, status.HTTP_200_OK)
++        names = [row["name"] for row in response.data["results"]]
++        self.assertEqual(names, [self.mfi_1.name])
++
++    # --- MFIReport: separation of duty on approve ------------------------
++
++    def test_mfi_staff_cannot_approve_their_own_report(self):
++        report = MFIReport.objects.create(
++            mfi=self.mfi_1,
++            period="2026-08-01",
++            status=MFIReport.ReportStatus.SUBMITTED,
++        )
++        response = self._client(self.mfi_1_officer).post(
++            f"/api/mfi-reports/{report.id}/approve/"
++        )
++        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
++
++    def test_aom_staff_can_approve_report_for_their_aoms_mfi(self):
++        report = MFIReport.objects.create(
++            mfi=self.mfi_1,
++            period="2026-08-01",
++            status=MFIReport.ReportStatus.SUBMITTED,
++        )
++        response = self._client(self.aom_1_staff).post(
++            f"/api/mfi-reports/{report.id}/approve/"
++        )
++        self.assertEqual(response.status_code, status.HTTP_200_OK)
+ 
+-# Create your tests here.
++    def test_aom_staff_cannot_see_other_aoms_reports(self):
++        MFIReport.objects.create(
++            mfi=self.mfi_2,
++            period="2026-08-01",
++            status=MFIReport.ReportStatus.SUBMITTED,
++        )
++        response = self._client(self.aom_1_staff).get("/api/mfi-reports/")
++        self.assertEqual(response.status_code, status.HTTP_200_OK)
++        self.assertEqual(response.data["count"], 0)
+diff --git a/core/views.py b/core/views.py
+index 62c7ce3..0266f31 100644
+--- a/core/views.py
++++ b/core/views.py
+@@ -3,8 +3,39 @@ from django.utils import timezone
+ from django_tenants.utils import schema_context
+ from rest_framework import permissions, status, viewsets
+ from rest_framework.decorators import action
++from rest_framework.exceptions import PermissionDenied
+ from rest_framework.response import Response
+ 
++from .permissions import (
++    AOM_STAFF,
++    AoMPermission,
++    AoMReportPermission,
++    DONOR_STAFF,
++    DomainPermission,
++    DonorPermission,
++    DonorReportPermission,
++    ExchangeRatePermission,
++    GlobalUserPermission,
++    MFIPermission,
++    MFIReportPermission,
++    SUPER_ADMIN,
++    get_role,
++)
++
++
++def _require_approver_role(request, *allowed_roles):
++    """
++    Separation of duty: whoever submits a report may not be the one who
++    approves/rejects it. SUPER_ADMIN can always act.
++    """
++
++    role = get_role(request)
++    if role == SUPER_ADMIN:
++        return
++    if role not in allowed_roles:
++        raise PermissionDenied(
++            "You are not authorized to approve or reject this report."
++        )
+ from .models import (
+     AoM,
+     AoMReport,
+@@ -36,15 +67,19 @@ class DonorViewSet(viewsets.ModelViewSet):
+     Global donors stored in the public/shared schema.
+     """
+ 
+-    queryset = Donor.objects.all().order_by("name")
+     serializer_class = DonorSerializer
+-    permission_classes = [permissions.IsAuthenticated]
++    permission_classes = [permissions.IsAuthenticated, DonorPermission]
+ 
+     filterset_fields = ["base_currency"]
+     search_fields = ["name", "contact_email", "contact_phone"]
+     ordering_fields = ["name", "created_at"]
+     ordering = ["name"]
+ 
++    def get_queryset(self):
++        return DonorPermission.scope_queryset(
++            self.request, Donor.objects.all().order_by("name")
++        )
++
+ 
+ class AoMViewSet(viewsets.ModelViewSet):
+     """
+@@ -52,7 +87,7 @@ class AoMViewSet(viewsets.ModelViewSet):
+     """
+ 
+     serializer_class = AoMSerializer
+-    permission_classes = [permissions.IsAuthenticated]
++    permission_classes = [permissions.IsAuthenticated, AoMPermission]
+ 
+     filterset_fields = ["donor"]
+     search_fields = ["name", "code", "contact_email"]
+@@ -60,11 +95,12 @@ class AoMViewSet(viewsets.ModelViewSet):
+     ordering = ["name"]
+ 
+     def get_queryset(self):
+-        return (
++        queryset = (
+             AoM.objects.select_related("donor")
+             .annotate(mfi_count=Count("mfis"))
+             .order_by("name")
+         )
++        return AoMPermission.scope_queryset(self.request, queryset)
+ 
+ 
+ class GlobalUserViewSet(viewsets.ModelViewSet):
+@@ -73,7 +109,7 @@ class GlobalUserViewSet(viewsets.ModelViewSet):
+     """
+ 
+     serializer_class = GlobalUserSerializer
+-    permission_classes = [permissions.IsAuthenticated]
++    permission_classes = [permissions.IsAuthenticated, GlobalUserPermission]
+ 
+     filterset_fields = ["role", "aom", "donor", "mfi", "is_active", "is_staff"]
+     search_fields = ["username", "email", "first_name", "last_name"]
+@@ -81,11 +117,12 @@ class GlobalUserViewSet(viewsets.ModelViewSet):
+     ordering = ["username"]
+ 
+     def get_queryset(self):
+-        return GlobalUser.objects.select_related(
++        queryset = GlobalUser.objects.select_related(
+             "aom",
+             "donor",
+             "mfi",
+         ).order_by("username")
++        return GlobalUserPermission.scope_queryset(self.request, queryset)
+ 
+     @action(detail=False, methods=["get"], url_path="me")
+     def me(self, request):
+@@ -104,7 +141,7 @@ class MFIViewSet(viewsets.ModelViewSet):
+     """
+ 
+     serializer_class = MFIListSerializer
+-    permission_classes = [permissions.IsAuthenticated]
++    permission_classes = [permissions.IsAuthenticated, MFIPermission]
+ 
+     filterset_fields = [
+         "aom",
+@@ -131,7 +168,7 @@ class MFIViewSet(viewsets.ModelViewSet):
+         if self.action == "retrieve":
+             queryset = queryset.prefetch_related("domains", "reports")
+ 
+-        return queryset
++        return MFIPermission.scope_queryset(self.request, queryset)
+ 
+     def get_serializer_class(self):
+         if self.action == "list":
+@@ -227,7 +264,7 @@ class DomainViewSet(viewsets.ModelViewSet):
+     """
+ 
+     serializer_class = DomainSerializer
+-    permission_classes = [permissions.IsAuthenticated]
++    permission_classes = [permissions.IsAuthenticated, DomainPermission]
+ 
+     filterset_fields = ["tenant", "is_primary"]
+     search_fields = ["domain", "tenant__name"]
+@@ -235,7 +272,8 @@ class DomainViewSet(viewsets.ModelViewSet):
+     ordering = ["domain"]
+ 
+     def get_queryset(self):
+-        return Domain.objects.select_related("tenant").all()
++        queryset = Domain.objects.select_related("tenant").all()
++        return DomainPermission.scope_queryset(self.request, queryset)
+ 
+ 
+ class ExchangeRateViewSet(viewsets.ModelViewSet):
+@@ -245,7 +283,7 @@ class ExchangeRateViewSet(viewsets.ModelViewSet):
+ 
+     queryset = ExchangeRate.objects.all().order_by("-date")
+     serializer_class = ExchangeRateSerializer
+-    permission_classes = [permissions.IsAuthenticated]
++    permission_classes = [permissions.IsAuthenticated, ExchangeRatePermission]
+ 
+     filterset_fields = ["from_currency", "to_currency", "date", "source"]
+     search_fields = ["from_currency", "to_currency", "source"]
+@@ -259,7 +297,7 @@ class MFIReportViewSet(viewsets.ModelViewSet):
+     """
+ 
+     serializer_class = MFIReportSerializer
+-    permission_classes = [permissions.IsAuthenticated]
++    permission_classes = [permissions.IsAuthenticated, MFIReportPermission]
+ 
+     filterset_fields = ["mfi", "status", "period"]
+     search_fields = ["mfi__name", "mfi__code"]
+@@ -267,13 +305,14 @@ class MFIReportViewSet(viewsets.ModelViewSet):
+     ordering = ["-period"]
+ 
+     def get_queryset(self):
+-        return MFIReport.objects.select_related(
++        queryset = MFIReport.objects.select_related(
+             "mfi",
+             "mfi__aom",
+             "mfi__donor",
+             "generated_by",
+             "approved_by",
+         ).order_by("-period")
++        return MFIReportPermission().scope_queryset(self.request, queryset)
+ 
+     def perform_create(self, serializer):
+         serializer.save(generated_by=self.request.user)
+@@ -297,6 +336,7 @@ class MFIReportViewSet(viewsets.ModelViewSet):
+ 
+     @action(detail=True, methods=["post"])
+     def approve(self, request, pk=None):
++        _require_approver_role(request, AOM_STAFF)
+         report = self.get_object()
+ 
+         if report.status == MFIReport.ReportStatus.APPROVED:
+@@ -315,6 +355,7 @@ class MFIReportViewSet(viewsets.ModelViewSet):
+ 
+     @action(detail=True, methods=["post"])
+     def reject(self, request, pk=None):
++        _require_approver_role(request, AOM_STAFF)
+         report = self.get_object()
+ 
+         if report.status == MFIReport.ReportStatus.APPROVED:
+@@ -338,7 +379,7 @@ class AoMReportViewSet(viewsets.ModelViewSet):
+     """
+ 
+     serializer_class = AoMReportSerializer
+-    permission_classes = [permissions.IsAuthenticated]
++    permission_classes = [permissions.IsAuthenticated, AoMReportPermission]
+ 
+     filterset_fields = ["aom", "status", "period"]
+     search_fields = ["aom__name", "aom__code"]
+@@ -346,18 +387,20 @@ class AoMReportViewSet(viewsets.ModelViewSet):
+     ordering = ["-period"]
+ 
+     def get_queryset(self):
+-        return AoMReport.objects.select_related(
++        queryset = AoMReport.objects.select_related(
+             "aom",
+             "aom__donor",
+             "generated_by",
+             "approved_by",
+         ).order_by("-period")
++        return AoMReportPermission().scope_queryset(self.request, queryset)
+ 
+     def perform_create(self, serializer):
+         serializer.save(generated_by=self.request.user)
+ 
+     @action(detail=True, methods=["post"])
+     def approve(self, request, pk=None):
++        _require_approver_role(request, DONOR_STAFF)
+         report = self.get_object()
+ 
+         if report.status == AoMReport.ReportStatus.APPROVED:
+@@ -381,7 +424,7 @@ class DonorReportViewSet(viewsets.ModelViewSet):
+     """
+ 
+     serializer_class = DonorReportSerializer
+-    permission_classes = [permissions.IsAuthenticated]
++    permission_classes = [permissions.IsAuthenticated, DonorReportPermission]
+ 
+     filterset_fields = ["donor", "status", "period"]
+     search_fields = ["donor__name"]
+@@ -389,17 +432,19 @@ class DonorReportViewSet(viewsets.ModelViewSet):
+     ordering = ["-period"]
+ 
+     def get_queryset(self):
+-        return DonorReport.objects.select_related(
++        queryset = DonorReport.objects.select_related(
+             "donor",
+             "generated_by",
+             "approved_by",
+         ).order_by("-period")
++        return DonorReportPermission().scope_queryset(self.request, queryset)
+ 
+     def perform_create(self, serializer):
+         serializer.save(generated_by=self.request.user)
+ 
+     @action(detail=True, methods=["post"])
+     def approve(self, request, pk=None):
++        _require_approver_role(request)  # SUPER_ADMIN only
+         report = self.get_object()
+ 
+         if report.status == DonorReport.ReportStatus.APPROVED:
+diff --git a/tenants/tests.py b/tenants/tests.py
+index 7ce503c..6ff6ed4 100644
+--- a/tenants/tests.py
++++ b/tenants/tests.py
+@@ -1,3 +1,294 @@
+-from django.test import TestCase
++"""
++Tenant isolation tests.
+ 
+-# Create your tests here.
++These exist specifically to prove the authorization fix in
++`TenantViewSetMixin._check_tenant_membership`: a user authenticated
++against one MFI must not be able to read or write another MFI's
++tenant-schema data just by sending a different `X-Tenant-Subdomain`
++header.
++
++Uses TransactionTestCase (not TestCase) because creating an MFI triggers
++real `CREATE SCHEMA` / schema-migration DDL via django-tenants, which
++needs to be visible outside the test's own transaction.
++"""
++
++from django.contrib.auth import get_user_model
++from django.db import connection
++from django.test import TransactionTestCase
++from rest_framework import status
++from rest_framework.test import APIClient
++
++from core.models import AoM, Domain, Donor, MFI
++
++User = get_user_model()
++
++
++class TenantIsolationTests(TransactionTestCase):
++    def setUp(self):
++        # The previous test's requests left this connection's search_path
++        # pointed at whatever tenant schema it last resolved to (set via
++        # connection.set_tenant() in the middleware). Reset before doing
++        # any public-schema work of our own.
++        connection.set_schema_to_public()
++
++        # Unique suffix per test method: TransactionTestCase's automatic
++        # flush-between-tests doesn't cleanly reset django-tenants' public
++        # schema state here, so reused names/codes collide across tests.
++        suffix = self._testMethodName[-20:]
++
++        # Needed so the "no X-Tenant-Subdomain header" test hits
++        # TenantViewSetMixin's intended 400 response rather than a raw
++        # 404 from the middleware failing to find *any* public tenant.
++        self.public_tenant = MFI.objects.filter(schema_name="public").first()
++        if self.public_tenant is None:
++            self.public_tenant = MFI(
++                schema_name="public",
++                name="Public",
++                code="PUBLIC",
++                registration_number="PUBLIC-001",
++                email="admin@localhost",
++                phone="000",
++                address="Public schema",
++            )
++            self.public_tenant.auto_create_schema = False
++            self.public_tenant.save()
++        Domain.objects.get_or_create(
++            tenant=self.public_tenant,
++            domain="testserver",
++            defaults={"is_primary": True},
++        )
++
++        self.donor = Donor.objects.create(
++            name=f"Test Donor {suffix}",
++            contact_email="donor@example.com",
++        )
++        self.aom = AoM.objects.create(
++            name=f"Test AoM {suffix}",
++            code=f"TAOM{suffix}"[:20],
++            donor=self.donor,
++            contact_email="aom@example.com",
++        )
++
++        self.mfi_a = MFI(
++            name=f"MFI Alpha {suffix}",
++            registration_number=f"REG-ALPHA-{suffix}",
++            email="alpha@example.com",
++            phone="000",
++            address="addr",
++            aom=self.aom,
++        )
++        self.mfi_a.save()
++        Domain.objects.create(
++            tenant=self.mfi_a,
++            domain=self.mfi_a.schema_name,
++            is_primary=True,
++        )
++
++        self.mfi_b = MFI(
++            name=f"MFI Beta {suffix}",
++            registration_number=f"REG-BETA-{suffix}",
++            email="beta@example.com",
++            phone="000",
++            address="addr",
++            aom=self.aom,
++        )
++        self.mfi_b.save()
++        Domain.objects.create(
++            tenant=self.mfi_b,
++            domain=self.mfi_b.schema_name,
++            is_primary=True,
++        )
++
++        self.officer_a = User.objects.create_user(
++            username=f"officer_a_{suffix}",
++            password="pw",
++            role=User.Role.LOAN_OFFICER,
++            mfi=self.mfi_a,
++        )
++        self.admin_a = User.objects.create_user(
++            username=f"admin_a_{suffix}",
++            password="pw",
++            role=User.Role.MFI_ADMIN,
++            mfi=self.mfi_a,
++        )
++        self.aom_staff = User.objects.create_user(
++            username=f"aom_staff_{suffix}",
++            password="pw",
++            role=User.Role.AOM_STAFF,
++            aom=self.aom,
++        )
++        self.super_admin = User.objects.create_user(
++            username=f"super_{suffix}",
++            password="pw",
++            role=User.Role.SUPER_ADMIN,
++        )
++
++    def tearDown(self):
++        connection.set_schema_to_public()
++        self.mfi_a.delete(force_drop=True)
++        self.mfi_b.delete(force_drop=True)
++
++    def _client_for(self, user, tenant_subdomain):
++        client = APIClient()
++        client.force_authenticate(user=user)
++        client.credentials(HTTP_X_TENANT_SUBDOMAIN=tenant_subdomain)
++        return client
++
++    # --- The core exploit this whole suite exists to close -------------
++
++    def test_loan_officer_cannot_read_other_mfis_members(self):
++        client = self._client_for(self.officer_a, self.mfi_b.schema_name)
++        response = client.get("/api/tenant/members/")
++        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
++
++    def test_loan_officer_cannot_read_other_mfis_loans(self):
++        client = self._client_for(self.officer_a, self.mfi_b.schema_name)
++        response = client.get("/api/tenant/loans/")
++        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
++
++    def test_mfi_admin_cannot_write_to_other_mfi(self):
++        client = self._client_for(self.admin_a, self.mfi_b.schema_name)
++        response = client.post(
++            "/api/tenant/branches/",
++            {"name": "Injected Branch", "code": "HACK"},
++        )
++        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
++
++    # --- Legitimate access still works ----------------------------------
++
++    def test_loan_officer_can_read_own_mfis_members(self):
++        client = self._client_for(self.officer_a, self.mfi_a.schema_name)
++        response = client.get("/api/tenant/members/")
++        self.assertEqual(response.status_code, status.HTTP_200_OK)
++
++    def test_mfi_admin_can_write_to_own_mfi(self):
++        client = self._client_for(self.admin_a, self.mfi_a.schema_name)
++        response = client.post(
++            "/api/tenant/branches/",
++            {"name": "Head Office", "code": "HQ"},
++        )
++        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
++
++    def test_super_admin_can_read_any_mfi(self):
++        client = self._client_for(self.super_admin, self.mfi_b.schema_name)
++        response = client.get("/api/tenant/members/")
++        self.assertEqual(response.status_code, status.HTTP_200_OK)
++
++    # --- Loan officers are read/write but not destructive ---------------
++
++    def test_loan_officer_cannot_delete_even_within_own_mfi(self):
++        admin_client = self._client_for(self.admin_a, self.mfi_a.schema_name)
++        created = admin_client.post(
++            "/api/tenant/branches/",
++            {"name": "Branch To Delete", "code": "DEL1"},
++        )
++        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
++        branch_id = created.data["id"]
++
++        officer_client = self._client_for(self.officer_a, self.mfi_a.schema_name)
++        response = officer_client.delete(f"/api/tenant/branches/{branch_id}/")
++        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
++
++    # --- AoM staff are read-only oversight, scoped to their own AoM -----
++
++    def test_aom_staff_can_read_but_not_write_own_aoms_mfi(self):
++        client = self._client_for(self.aom_staff, self.mfi_a.schema_name)
++        read_response = client.get("/api/tenant/members/")
++        self.assertEqual(read_response.status_code, status.HTTP_200_OK)
++
++        write_response = client.post(
++            "/api/tenant/branches/",
++            {"name": "AoM Injected Branch", "code": "HACK2"},
++        )
++        self.assertEqual(write_response.status_code, status.HTTP_403_FORBIDDEN)
++
++    def test_no_tenant_header_falls_back_to_public_and_is_rejected(self):
++        client = APIClient()
++        client.force_authenticate(user=self.officer_a)
++        response = client.get("/api/tenant/members/")
++        self.assertIn(
++            response.status_code,
++            (status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN),
++        )
++
++
++class CrossTenantReportScopingTests(TransactionTestCase):
++    """
++    The cross-tenant reporting endpoints intentionally read across tenant
++    lines, so tenant-schema isolation alone doesn't protect them -- each
++    action has to check the caller's own organizational scope. These
++    tests prove that check exists.
++    """
++
++    def setUp(self):
++        connection.set_schema_to_public()
++        suffix = self._testMethodName[-20:]
++
++        # These requests carry no X-Tenant-Subdomain header, so
++        # TenantHeaderMiddleware falls back to hostname-based lookup
++        # (which won't match the test client's "testserver" host) and
++        # then to the public-schema tenant. That row must exist.
++        self.public_tenant = MFI.objects.filter(schema_name="public").first()
++        if self.public_tenant is None:
++            self.public_tenant = MFI(
++                schema_name="public",
++                name="Public",
++                code="PUBLIC",
++                registration_number="PUBLIC-001",
++                email="admin@localhost",
++                phone="000",
++                address="Public schema",
++            )
++            self.public_tenant.auto_create_schema = False
++            self.public_tenant.save()
++        Domain.objects.get_or_create(
++            tenant=self.public_tenant,
++            domain="testserver",
++            defaults={"is_primary": True},
++        )
++
++        self.donor = Donor.objects.create(
++            name=f"Test Donor {suffix}", contact_email="donor@example.com"
++        )
++        self.aom_1 = AoM.objects.create(
++            name=f"AoM One {suffix}",
++            code=f"AOM1{suffix}"[:20],
++            donor=self.donor,
++            contact_email="a1@example.com",
++        )
++        self.aom_2 = AoM.objects.create(
++            name=f"AoM Two {suffix}",
++            code=f"AOM2{suffix}"[:20],
++            donor=self.donor,
++            contact_email="a2@example.com",
++        )
++
++        self.aom_1_staff = User.objects.create_user(
++            username=f"aom1_staff_{suffix}",
++            password="pw",
++            role=User.Role.AOM_STAFF,
++            aom=self.aom_1,
++        )
++
++    def test_aom_staff_cannot_generate_report_for_a_different_aom(self):
++        client = APIClient()
++        client.force_authenticate(user=self.aom_1_staff)
++
++        response = client.post(
++            "/api/tenant/public/cross-tenant/generate_aom_report/",
++            {"aom_id": self.aom_2.id, "period": "2026-08"},
++        )
++        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
++
++    def test_aom_staff_mfi_reports_query_is_scoped_to_own_aom(self):
++        client = APIClient()
++        client.force_authenticate(user=self.aom_1_staff)
++
++        # Even without filters, and even if the caller asks for another
++        # AoM's id explicitly, results must never include aom_2's data.
++        response = client.get(
++            "/api/tenant/public/cross-tenant/mfi_reports/",
++            {"aom": self.aom_2.id},
++        )
++        self.assertEqual(response.status_code, status.HTTP_200_OK)
++        self.assertEqual(response.data["count"], 0)
+diff --git a/tenants/views.py b/tenants/views.py
+index 6d3824f..4157530 100644
+--- a/tenants/views.py
++++ b/tenants/views.py
+@@ -61,8 +61,10 @@ from .serializers import (
+ )
+ 
+ from core.models import (
++    AoM,
+     AoMReport,
+     DonorReport,
++    MFI,
+     MFIReport,
+ )
+ 
+@@ -72,6 +74,15 @@ from core.serializers import (
+     MFIReportSerializer,
+ )
+ 
++from core.permissions import (
++    AOM_STAFF,
++    DONOR_STAFF,
++    LOAN_OFFICER,
++    MFI_WRITE_ROLES,
++    SUPER_ADMIN,
++    get_role,
++)
++
+ 
+ TWO_PLACES = Decimal("0.01")
+ 
+@@ -499,8 +510,23 @@ class TenantViewSetMixin:
+     """
+     Base mixin for tenant schema endpoints.
+ 
+-    These endpoints must not be accessed from the public schema.
+-    The frontend must send X-Tenant-Subdomain.
++    These endpoints must not be accessed from the public schema, AND the
++    requesting user must actually belong to the resolved tenant. Without
++    this second check, any authenticated user -- regardless of which MFI
++    they belong to -- could send an arbitrary `X-Tenant-Subdomain` header
++    and read or edit another MFI's members, loans, and repayments. That is
++    a full tenant-isolation bypass, so this check is not optional.
++
++    Access by role, once a tenant has been resolved:
++        SUPER_ADMIN   full read/write on any tenant.
++        AOM_STAFF     read-only, only when the tenant's MFI belongs to
++                      their own AoM.
++        DONOR_STAFF   read-only, only when the tenant's MFI is funded by
++                      their own donor (directly or via its AoM).
++        MFI_ADMIN /
++        MFI_MANAGER   read/write, only their own MFI's tenant.
++        LOAN_OFFICER  read/write except DELETE, only their own MFI's
++                      tenant.
+     """
+ 
+     permission_classes = [permissions.IsAuthenticated]
+@@ -523,6 +549,51 @@ class TenantViewSetMixin:
+                 }
+             )
+ 
++        self._check_tenant_membership(request, tenant)
++
++    def _check_tenant_membership(self, request, tenant):
++        role = get_role(request)
++        user = request.user
++
++        if role == SUPER_ADMIN:
++            return
++
++        if role == AOM_STAFF:
++            if tenant.aom_id == user.aom_id and request.method in permissions.SAFE_METHODS:
++                return
++            raise exceptions.PermissionDenied(
++                "AoM staff have read-only access to their own AoM's MFIs."
++            )
++
++        if role == DONOR_STAFF:
++            same_donor = tenant.donor_id == user.donor_id or (
++                tenant.aom_id and tenant.aom.donor_id == user.donor_id
++            )
++            if same_donor and request.method in permissions.SAFE_METHODS:
++                return
++            raise exceptions.PermissionDenied(
++                "Donor staff have read-only access to MFIs they fund."
++            )
++
++        if role in MFI_WRITE_ROLES:  # MFI_ADMIN, MFI_MANAGER
++            if tenant.id == user.mfi_id:
++                return
++            raise exceptions.PermissionDenied(
++                "You do not have access to this MFI's data."
++            )
++
++        if role == LOAN_OFFICER:
++            if tenant.id == user.mfi_id and request.method != "DELETE":
++                return
++            raise exceptions.PermissionDenied(
++                "You do not have access to this MFI's data, "
++                "or loan officers cannot delete records."
++            )
++
++        raise exceptions.PermissionDenied(
++            "Your account is not authorized to access MFI tenant data."
++        )
++
+ 
+ # =============================================================================
+ # Geography ViewSets
+@@ -1075,10 +1146,20 @@ class TenantReportViewSet(TenantViewSetMixin, viewsets.ViewSet):
+ 
+ 
+ class CrossTenantReportViewSet(viewsets.ViewSet):
++    """
++    Reads and generates consolidated reports across MFI/AoM/Donor
++    boundaries. Because these endpoints exist precisely to cross tenant
++    lines, every action here must independently enforce that the caller
++    is only ever shown, or allowed to generate, data for their own
++    organization -- there is no tenant-schema wall doing that for us here.
++    """
++
+     permission_classes = [permissions.IsAuthenticated]
+ 
+     @action(detail=False, methods=["get"], url_path="mfi_reports")
+     def mfi_reports(self, request):
++        role = get_role(request)
++
+         with schema_context(get_public_schema_name()):
+             queryset = MFIReport.objects.select_related(
+                 "mfi",
+@@ -1086,6 +1167,23 @@ class CrossTenantReportViewSet(viewsets.ViewSet):
+                 "mfi__donor",
+             ).order_by("-period")
+ 
++            # Restrict to the caller's own organization *before* applying
++            # their requested filters, so a non-super-admin can narrow
++            # their own results but never widen them past their scope.
++            if role == AOM_STAFF:
++                queryset = queryset.filter(mfi__aom_id=request.user.aom_id)
++            elif role == DONOR_STAFF:
++                from django.db.models import Q
++
++                queryset = queryset.filter(
++                    Q(mfi__donor_id=request.user.donor_id)
++                    | Q(mfi__aom__donor_id=request.user.donor_id)
++                )
++            elif role in MFI_WRITE_ROLES or role == LOAN_OFFICER:
++                queryset = queryset.filter(mfi_id=request.user.mfi_id)
++            elif role != SUPER_ADMIN:
++                queryset = queryset.none()
++
+             mfi_id = request.query_params.get("mfi")
+             aom_id = request.query_params.get("aom")
+             donor_id = request.query_params.get("donor")
+@@ -1130,6 +1228,16 @@ class CrossTenantReportViewSet(viewsets.ViewSet):
+                 status=status.HTTP_400_BAD_REQUEST,
+             )
+ 
++        role = get_role(request)
++        if role == AOM_STAFF and str(request.user.aom_id) != str(aom_id):
++            raise exceptions.PermissionDenied(
++                "You can only generate reports for your own AoM."
++            )
++        if role not in (SUPER_ADMIN, AOM_STAFF):
++            raise exceptions.PermissionDenied(
++                "You are not authorized to generate AoM reports."
++            )
++
+         with schema_context(get_public_schema_name()):
+             mfi_reports = (
+                 MFIReport.objects.filter(
+@@ -1183,6 +1291,16 @@ class CrossTenantReportViewSet(viewsets.ViewSet):
+                 status=status.HTTP_400_BAD_REQUEST,
+             )
+ 
++        role = get_role(request)
++        if role == DONOR_STAFF and str(request.user.donor_id) != str(donor_id):
++            raise exceptions.PermissionDenied(
++                "You can only generate reports for your own donor."
++            )
++        if role not in (SUPER_ADMIN, DONOR_STAFF):
++            raise exceptions.PermissionDenied(
++                "You are not authorized to generate donor reports."
++            )
++
+         with schema_context(get_public_schema_name()):
+             aom_reports = (
+                 AoMReport.objects.filter(
+@@ -1251,6 +1369,41 @@ class CrossTenantReportViewSet(viewsets.ViewSet):
+                 status=status.HTTP_400_BAD_REQUEST,
+             )
+ 
++        role = get_role(request)
++        user = request.user
++
++        if role != SUPER_ADMIN:
++            allowed = False
++            if report_type == "mfi":
++                if role in MFI_WRITE_ROLES or role == LOAN_OFFICER:
++                    allowed = entity_id == user.mfi_id
++                elif role == AOM_STAFF:
++                    allowed = MFI.objects.filter(
++                        id=entity_id, aom_id=user.aom_id
++                    ).exists()
++                elif role == DONOR_STAFF:
++                    from django.db.models import Q
++
++                    allowed = MFI.objects.filter(
++                        Q(id=entity_id)
++                        & (Q(donor_id=user.donor_id) | Q(aom__donor_id=user.donor_id))
++                    ).exists()
++            elif report_type == "aom":
++                if role == AOM_STAFF:
++                    allowed = entity_id == user.aom_id
++                elif role == DONOR_STAFF:
++                    allowed = AoM.objects.filter(
++                        id=entity_id, donor_id=user.donor_id
++                    ).exists()
++            elif report_type == "donor":
++                if role == DONOR_STAFF:
++                    allowed = entity_id == user.donor_id
++
++            if not allowed:
++                raise exceptions.PermissionDenied(
++                    "You are not authorized to view this report."
++                )
++
+         cache_key = f"{report_type}_report_{entity_id}_{period.isoformat()}"
+         cached_data = cache.get(cache_key)
+ 

@@ -210,6 +210,12 @@ class GlobalUserSerializer(serializers.ModelSerializer):
         default=None,
     )
 
+    mfi_schema = serializers.CharField(
+        source="mfi.schema_name",
+        read_only=True,
+        default=None,
+    )
+
     class Meta:
         model = GlobalUser
         fields = [
@@ -226,6 +232,7 @@ class GlobalUserSerializer(serializers.ModelSerializer):
             "donor_name",
             "mfi",
             "mfi_name",
+            "mfi_schema",
             "is_staff",
             "is_active",
             "date_joined",

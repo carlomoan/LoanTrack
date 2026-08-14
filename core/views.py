@@ -3,8 +3,39 @@ from django.utils import timezone
 from django_tenants.utils import schema_context
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
+from .permissions import (
+    AOM_STAFF,
+    AoMPermission,
+    AoMReportPermission,
+    DONOR_STAFF,
+    DomainPermission,
+    DonorPermission,
+    DonorReportPermission,
+    ExchangeRatePermission,
+    GlobalUserPermission,
+    MFIPermission,
+    MFIReportPermission,
+    SUPER_ADMIN,
+    get_role,
+)
+
+
+def _require_approver_role(request, *allowed_roles):
+    """
+    Separation of duty: whoever submits a report may not be the one who
+    approves/rejects it. SUPER_ADMIN can always act.
+    """
+
+    role = get_role(request)
+    if role == SUPER_ADMIN:
+        return
+    if role not in allowed_roles:
+        raise PermissionDenied(
+            "You are not authorized to approve or reject this report."
+        )
 from .models import (
     AoM,
     AoMReport,
@@ -36,14 +67,18 @@ class DonorViewSet(viewsets.ModelViewSet):
     Global donors stored in the public/shared schema.
     """
 
-    queryset = Donor.objects.all().order_by("name")
     serializer_class = DonorSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, DonorPermission]
 
     filterset_fields = ["base_currency"]
     search_fields = ["name", "contact_email", "contact_phone"]
     ordering_fields = ["name", "created_at"]
     ordering = ["name"]
+
+    def get_queryset(self):
+        return DonorPermission.scope_queryset(
+            self.request, Donor.objects.all().order_by("name")
+        )
 
 
 class AoMViewSet(viewsets.ModelViewSet):
@@ -52,7 +87,7 @@ class AoMViewSet(viewsets.ModelViewSet):
     """
 
     serializer_class = AoMSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, AoMPermission]
 
     filterset_fields = ["donor"]
     search_fields = ["name", "code", "contact_email"]
@@ -60,11 +95,12 @@ class AoMViewSet(viewsets.ModelViewSet):
     ordering = ["name"]
 
     def get_queryset(self):
-        return (
+        queryset = (
             AoM.objects.select_related("donor")
             .annotate(mfi_count=Count("mfis"))
             .order_by("name")
         )
+        return AoMPermission.scope_queryset(self.request, queryset)
 
 
 class GlobalUserViewSet(viewsets.ModelViewSet):
@@ -73,7 +109,7 @@ class GlobalUserViewSet(viewsets.ModelViewSet):
     """
 
     serializer_class = GlobalUserSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, GlobalUserPermission]
 
     filterset_fields = ["role", "aom", "donor", "mfi", "is_active", "is_staff"]
     search_fields = ["username", "email", "first_name", "last_name"]
@@ -81,11 +117,12 @@ class GlobalUserViewSet(viewsets.ModelViewSet):
     ordering = ["username"]
 
     def get_queryset(self):
-        return GlobalUser.objects.select_related(
+        queryset = GlobalUser.objects.select_related(
             "aom",
             "donor",
             "mfi",
         ).order_by("username")
+        return GlobalUserPermission.scope_queryset(self.request, queryset)
 
     @action(detail=False, methods=["get"], url_path="me")
     def me(self, request):
@@ -97,6 +134,19 @@ class GlobalUserViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(request.user)
         return Response(serializer.data)
 
+    @action(detail=False, methods=["get"], url_path="roles")
+    def roles(self, request):
+        """
+        Returns the list of available user roles.
+        Used by Next.js: GET /api/users/roles/
+        """
+        from .models import GlobalUser
+        roles = [
+            {"value": choice[0], "label": choice[1]}
+            for choice in GlobalUser.Role.choices
+        ]
+        return Response(roles)
+
 
 class MFIViewSet(viewsets.ModelViewSet):
     """
@@ -104,7 +154,7 @@ class MFIViewSet(viewsets.ModelViewSet):
     """
 
     serializer_class = MFIListSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, MFIPermission]
 
     filterset_fields = [
         "aom",
@@ -131,7 +181,7 @@ class MFIViewSet(viewsets.ModelViewSet):
         if self.action == "retrieve":
             queryset = queryset.prefetch_related("domains", "reports")
 
-        return queryset
+        return MFIPermission.scope_queryset(self.request, queryset)
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -227,7 +277,7 @@ class DomainViewSet(viewsets.ModelViewSet):
     """
 
     serializer_class = DomainSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, DomainPermission]
 
     filterset_fields = ["tenant", "is_primary"]
     search_fields = ["domain", "tenant__name"]
@@ -235,7 +285,8 @@ class DomainViewSet(viewsets.ModelViewSet):
     ordering = ["domain"]
 
     def get_queryset(self):
-        return Domain.objects.select_related("tenant").all()
+        queryset = Domain.objects.select_related("tenant").all()
+        return DomainPermission.scope_queryset(self.request, queryset)
 
 
 class ExchangeRateViewSet(viewsets.ModelViewSet):
@@ -245,7 +296,7 @@ class ExchangeRateViewSet(viewsets.ModelViewSet):
 
     queryset = ExchangeRate.objects.all().order_by("-date")
     serializer_class = ExchangeRateSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, ExchangeRatePermission]
 
     filterset_fields = ["from_currency", "to_currency", "date", "source"]
     search_fields = ["from_currency", "to_currency", "source"]
@@ -259,7 +310,7 @@ class MFIReportViewSet(viewsets.ModelViewSet):
     """
 
     serializer_class = MFIReportSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, MFIReportPermission]
 
     filterset_fields = ["mfi", "status", "period"]
     search_fields = ["mfi__name", "mfi__code"]
@@ -267,13 +318,14 @@ class MFIReportViewSet(viewsets.ModelViewSet):
     ordering = ["-period"]
 
     def get_queryset(self):
-        return MFIReport.objects.select_related(
+        queryset = MFIReport.objects.select_related(
             "mfi",
             "mfi__aom",
             "mfi__donor",
             "generated_by",
             "approved_by",
         ).order_by("-period")
+        return MFIReportPermission().scope_queryset(self.request, queryset)
 
     def perform_create(self, serializer):
         serializer.save(generated_by=self.request.user)
@@ -297,6 +349,7 @@ class MFIReportViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def approve(self, request, pk=None):
+        _require_approver_role(request, AOM_STAFF)
         report = self.get_object()
 
         if report.status == MFIReport.ReportStatus.APPROVED:
@@ -315,6 +368,7 @@ class MFIReportViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def reject(self, request, pk=None):
+        _require_approver_role(request, AOM_STAFF)
         report = self.get_object()
 
         if report.status == MFIReport.ReportStatus.APPROVED:
@@ -338,7 +392,7 @@ class AoMReportViewSet(viewsets.ModelViewSet):
     """
 
     serializer_class = AoMReportSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, AoMReportPermission]
 
     filterset_fields = ["aom", "status", "period"]
     search_fields = ["aom__name", "aom__code"]
@@ -346,18 +400,20 @@ class AoMReportViewSet(viewsets.ModelViewSet):
     ordering = ["-period"]
 
     def get_queryset(self):
-        return AoMReport.objects.select_related(
+        queryset = AoMReport.objects.select_related(
             "aom",
             "aom__donor",
             "generated_by",
             "approved_by",
         ).order_by("-period")
+        return AoMReportPermission().scope_queryset(self.request, queryset)
 
     def perform_create(self, serializer):
         serializer.save(generated_by=self.request.user)
 
     @action(detail=True, methods=["post"])
     def approve(self, request, pk=None):
+        _require_approver_role(request, DONOR_STAFF)
         report = self.get_object()
 
         if report.status == AoMReport.ReportStatus.APPROVED:
@@ -381,7 +437,7 @@ class DonorReportViewSet(viewsets.ModelViewSet):
     """
 
     serializer_class = DonorReportSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, DonorReportPermission]
 
     filterset_fields = ["donor", "status", "period"]
     search_fields = ["donor__name"]
@@ -389,17 +445,19 @@ class DonorReportViewSet(viewsets.ModelViewSet):
     ordering = ["-period"]
 
     def get_queryset(self):
-        return DonorReport.objects.select_related(
+        queryset = DonorReport.objects.select_related(
             "donor",
             "generated_by",
             "approved_by",
         ).order_by("-period")
+        return DonorReportPermission().scope_queryset(self.request, queryset)
 
     def perform_create(self, serializer):
         serializer.save(generated_by=self.request.user)
 
     @action(detail=True, methods=["post"])
     def approve(self, request, pk=None):
+        _require_approver_role(request)  # SUPER_ADMIN only
         report = self.get_object()
 
         if report.status == DonorReport.ReportStatus.APPROVED:

@@ -1,22 +1,48 @@
 'use client';
 import { useQuery } from '@tanstack/react-query';
-import { tenantApi } from '@/api/tenant';
+import { tenantApi, crossTenantApi } from '@/api/tenant';
+import { sharedApi } from '@/api/shared';
 import { StatCard } from '@/components/dashboard/StatCard';
-import { Landmark, Users, AlertTriangle, TrendingUp, HandCoins } from 'lucide-react';
+import { Landmark, Users, AlertTriangle, TrendingUp, HandCoins, Building2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { useAuthStore } from '@/hooks/useAuthStore';
+import { useState } from 'react';
+
+interface MFISummary {
+  id: number;
+  name: string;
+  schema_name: string;
+}
 
 export default function DashboardPage() {
-  const { data: summary, isLoading } = useQuery({
-    queryKey: ['portfolio-summary'],
-    queryFn: () => tenantApi.loans.summary().then(res => res.data),
-    retry: false,
+  const user = useAuthStore((state) => state.user);
+  const isSuperAdmin = user?.role === 'SUPER_ADMIN';
+  const [selectedMFI, setSelectedMFI] = useState<MFISummary | null>(null);
+
+  // For SUPER_ADMIN without MFI, fetch list of MFIs to select from
+  const { data: mfis } = useQuery({
+    queryKey: ['mfis-for-dashboard'],
+    queryFn: () => sharedApi.mfis.list().then(res => res.data.results as MFISummary[]),
+    enabled: isSuperAdmin && !user?.mfi,
+    staleTime: 5 * 60 * 1000,
   });
 
-  const { data: trends } = useQuery({
-    queryKey: ['monthly-trends'],
+  // Use selected MFI or user's MFI
+  const effectiveSchema = selectedMFI?.schema_name || user?.mfi_schema;
+
+  const { data: summary, isLoading: summaryLoading, error: summaryError } = useQuery({
+    queryKey: ['portfolio-summary', effectiveSchema],
+    queryFn: () => tenantApi.loans.summary().then(res => res.data),
+    retry: false,
+    enabled: !!effectiveSchema,
+  });
+
+  const { data: trends, isLoading: trendsLoading } = useQuery({
+    queryKey: ['monthly-trends', effectiveSchema],
     queryFn: () => tenantApi.reports.monthlyTrends().then(res => res.data),
     retry: false,
+    enabled: !!effectiveSchema,
   });
 
   const portfolio = summary?.portfolio || {};
@@ -24,7 +50,42 @@ export default function DashboardPage() {
   const outstanding = parseFloat(portfolio.total_outstanding || 0);
   const activeLoans = portfolio.active_count || 0;
 
+  const isLoading = summaryLoading || trendsLoading;
+
+  if (isSuperAdmin && !user?.mfi && !selectedMFI) {
+    return (
+      <div className="space-y-8">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">Financial Overview</h1>
+          <p className="text-slate-500 mt-1">Select an MFI to view dashboard</p>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {mfis?.map((mfi) => (
+            <div
+              key={mfi.id}
+              onClick={() => setSelectedMFI(mfi)}
+              className="fuse-card p-6 cursor-pointer hover:bg-indigo-50 transition-colors border-2 border-slate-200 hover:border-indigo-300"
+            >
+              <Building2 className="h-10 w-10 text-indigo-600 mb-3" />
+              <h3 className="text-lg font-semibold text-slate-900">{mfi.name}</h3>
+              <p className="text-sm text-slate-500 mt-1">Schema: {mfi.schema_name}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   if (isLoading) return <div className="flex items-center justify-center h-full"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div></div>;
+
+  if (summaryError && !effectiveSchema) {
+    return (
+      <div className="text-center py-8">
+        <p className="text-red-600">Failed to load dashboard data</p>
+        <p className="text-sm text-slate-500 mt-1">Please select an MFI</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-8">
@@ -33,7 +94,21 @@ export default function DashboardPage() {
           <h1 className="text-2xl font-bold text-slate-900">Financial Overview</h1>
           <p className="text-slate-500 mt-1">Real-time consolidated portfolio metrics</p>
         </div>
-        <button className="fuse-btn-primary w-fit">Generate Monthly Report</button>
+        {isSuperAdmin && !user?.mfi && (
+          <select
+            value={selectedMFI?.id || ''}
+            onChange={(e) => {
+              const mfi = mfis?.find(m => m.id === Number(e.target.value));
+              setSelectedMFI(mfi || null);
+            }}
+            className="fuse-input w-fit"
+          >
+            <option value="">Select MFI...</option>
+            {mfis?.map((mfi) => (
+              <option key={mfi.id} value={mfi.id}>{mfi.name}</option>
+            ))}
+          </select>
+        )}
       </motion.div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">

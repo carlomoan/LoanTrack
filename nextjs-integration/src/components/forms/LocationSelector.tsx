@@ -2,7 +2,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import api from '@/api/client';
+import { tenantApi } from '@/api/tenant';
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
 
 export function LocationSelector({ onLocationChange }: { onLocationChange: (field: string, value: string) => void }) {
@@ -11,14 +11,14 @@ export function LocationSelector({ onLocationChange }: { onLocationChange: (fiel
 
   // Fetch Regions
   const { data: regions } = useQuery({
-    queryKey: ['regions'],
-    queryFn: () => api.get('/regions/').then(res => res.data),
+    queryKey: ['tenant', 'regions'],
+    queryFn: () => tenantApi.regions.list().then(res => res.data),
   });
 
   // Fetch Districts based on selected Region
   const { data: districts } = useQuery({
-    queryKey: ['districts', regionId],
-    queryFn: () => api.get(`/districts/?region=${regionId}`).then(res => res.data),
+    queryKey: ['tenant', 'districts', regionId],
+    queryFn: () => tenantApi.districts.list({ region: regionId }).then(res => res.data),
     enabled: !!regionId, // Only run query if regionId is selected
   });
 

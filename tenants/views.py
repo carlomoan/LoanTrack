@@ -61,8 +61,10 @@ from .serializers import (
 )
 
 from core.models import (
+    AoM,
     AoMReport,
     DonorReport,
+    MFI,
     MFIReport,
 )
 
@@ -70,6 +72,15 @@ from core.serializers import (
     AoMReportSerializer,
     DonorReportSerializer,
     MFIReportSerializer,
+)
+
+from core.permissions import (
+    AOM_STAFF,
+    DONOR_STAFF,
+    LOAN_OFFICER,
+    MFI_WRITE_ROLES,
+    SUPER_ADMIN,
+    get_role,
 )
 
 
@@ -499,8 +510,23 @@ class TenantViewSetMixin:
     """
     Base mixin for tenant schema endpoints.
 
-    These endpoints must not be accessed from the public schema.
-    The frontend must send X-Tenant-Subdomain.
+    These endpoints must not be accessed from the public schema, AND the
+    requesting user must actually belong to the resolved tenant. Without
+    this second check, any authenticated user -- regardless of which MFI
+    they belong to -- could send an arbitrary `X-Tenant-Subdomain` header
+    and read or edit another MFI's members, loans, and repayments. That is
+    a full tenant-isolation bypass, so this check is not optional.
+
+    Access by role, once a tenant has been resolved:
+        SUPER_ADMIN   full read/write on any tenant.
+        AOM_STAFF     read-only, only when the tenant's MFI belongs to
+                      their own AoM.
+        DONOR_STAFF   read-only, only when the tenant's MFI is funded by
+                      their own donor (directly or via its AoM).
+        MFI_ADMIN /
+        MFI_MANAGER   read/write, only their own MFI's tenant.
+        LOAN_OFFICER  read/write except DELETE, only their own MFI's
+                      tenant.
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -522,6 +548,51 @@ class TenantViewSetMixin:
                     )
                 }
             )
+
+        self._check_tenant_membership(request, tenant)
+
+    def _check_tenant_membership(self, request, tenant):
+        role = get_role(request)
+        user = request.user
+
+        if role == SUPER_ADMIN:
+            return
+
+        if role == AOM_STAFF:
+            if tenant.aom_id == user.aom_id and request.method in permissions.SAFE_METHODS:
+                return
+            raise exceptions.PermissionDenied(
+                "AoM staff have read-only access to their own AoM's MFIs."
+            )
+
+        if role == DONOR_STAFF:
+            same_donor = tenant.donor_id == user.donor_id or (
+                tenant.aom_id and tenant.aom.donor_id == user.donor_id
+            )
+            if same_donor and request.method in permissions.SAFE_METHODS:
+                return
+            raise exceptions.PermissionDenied(
+                "Donor staff have read-only access to MFIs they fund."
+            )
+
+        if role in MFI_WRITE_ROLES:  # MFI_ADMIN, MFI_MANAGER
+            if tenant.id == user.mfi_id:
+                return
+            raise exceptions.PermissionDenied(
+                "You do not have access to this MFI's data."
+            )
+
+        if role == LOAN_OFFICER:
+            if tenant.id == user.mfi_id and request.method != "DELETE":
+                return
+            raise exceptions.PermissionDenied(
+                "You do not have access to this MFI's data, "
+                "or loan officers cannot delete records."
+            )
+
+        raise exceptions.PermissionDenied(
+            "Your account is not authorized to access MFI tenant data."
+        )
 
 
 # =============================================================================
@@ -1075,16 +1146,43 @@ class TenantReportViewSet(TenantViewSetMixin, viewsets.ViewSet):
 
 
 class CrossTenantReportViewSet(viewsets.ViewSet):
+    """
+    Reads and generates consolidated reports across MFI/AoM/Donor
+    boundaries. Because these endpoints exist precisely to cross tenant
+    lines, every action here must independently enforce that the caller
+    is only ever shown, or allowed to generate, data for their own
+    organization -- there is no tenant-schema wall doing that for us here.
+    """
+
     permission_classes = [permissions.IsAuthenticated]
 
     @action(detail=False, methods=["get"], url_path="mfi_reports")
     def mfi_reports(self, request):
+        role = get_role(request)
+
         with schema_context(get_public_schema_name()):
             queryset = MFIReport.objects.select_related(
                 "mfi",
                 "mfi__aom",
                 "mfi__donor",
             ).order_by("-period")
+
+            # Restrict to the caller's own organization *before* applying
+            # their requested filters, so a non-super-admin can narrow
+            # their own results but never widen them past their scope.
+            if role == AOM_STAFF:
+                queryset = queryset.filter(mfi__aom_id=request.user.aom_id)
+            elif role == DONOR_STAFF:
+                from django.db.models import Q
+
+                queryset = queryset.filter(
+                    Q(mfi__donor_id=request.user.donor_id)
+                    | Q(mfi__aom__donor_id=request.user.donor_id)
+                )
+            elif role in MFI_WRITE_ROLES or role == LOAN_OFFICER:
+                queryset = queryset.filter(mfi_id=request.user.mfi_id)
+            elif role != SUPER_ADMIN:
+                queryset = queryset.none()
 
             mfi_id = request.query_params.get("mfi")
             aom_id = request.query_params.get("aom")
@@ -1128,6 +1226,16 @@ class CrossTenantReportViewSet(viewsets.ViewSet):
             return Response(
                 {"detail": "aom_id and valid period are required."},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        role = get_role(request)
+        if role == AOM_STAFF and str(request.user.aom_id) != str(aom_id):
+            raise exceptions.PermissionDenied(
+                "You can only generate reports for your own AoM."
+            )
+        if role not in (SUPER_ADMIN, AOM_STAFF):
+            raise exceptions.PermissionDenied(
+                "You are not authorized to generate AoM reports."
             )
 
         with schema_context(get_public_schema_name()):
@@ -1181,6 +1289,16 @@ class CrossTenantReportViewSet(viewsets.ViewSet):
             return Response(
                 {"detail": "donor_id and valid period are required."},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        role = get_role(request)
+        if role == DONOR_STAFF and str(request.user.donor_id) != str(donor_id):
+            raise exceptions.PermissionDenied(
+                "You can only generate reports for your own donor."
+            )
+        if role not in (SUPER_ADMIN, DONOR_STAFF):
+            raise exceptions.PermissionDenied(
+                "You are not authorized to generate donor reports."
             )
 
         with schema_context(get_public_schema_name()):
@@ -1250,6 +1368,41 @@ class CrossTenantReportViewSet(viewsets.ViewSet):
                 {"detail": "entity_id must be an integer."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        role = get_role(request)
+        user = request.user
+
+        if role != SUPER_ADMIN:
+            allowed = False
+            if report_type == "mfi":
+                if role in MFI_WRITE_ROLES or role == LOAN_OFFICER:
+                    allowed = entity_id == user.mfi_id
+                elif role == AOM_STAFF:
+                    allowed = MFI.objects.filter(
+                        id=entity_id, aom_id=user.aom_id
+                    ).exists()
+                elif role == DONOR_STAFF:
+                    from django.db.models import Q
+
+                    allowed = MFI.objects.filter(
+                        Q(id=entity_id)
+                        & (Q(donor_id=user.donor_id) | Q(aom__donor_id=user.donor_id))
+                    ).exists()
+            elif report_type == "aom":
+                if role == AOM_STAFF:
+                    allowed = entity_id == user.aom_id
+                elif role == DONOR_STAFF:
+                    allowed = AoM.objects.filter(
+                        id=entity_id, donor_id=user.donor_id
+                    ).exists()
+            elif report_type == "donor":
+                if role == DONOR_STAFF:
+                    allowed = entity_id == user.donor_id
+
+            if not allowed:
+                raise exceptions.PermissionDenied(
+                    "You are not authorized to view this report."
+                )
 
         cache_key = f"{report_type}_report_{entity_id}_{period.isoformat()}"
         cached_data = cache.get(cache_key)
