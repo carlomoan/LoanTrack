@@ -1,25 +1,38 @@
 'use client';
 
 import * as React from 'react';
-import { useForm, FormProvider, useFormContext, Controller, type Control, type FieldValues, type FormState, type UseFormReturn } from 'react-hook-form';
+import {
+  useForm,
+  FormProvider,
+  useFormContext,
+  Controller,
+  type Control,
+  type FieldValues,
+  type FormState,
+  type FieldPath,
+  type UseFormReturn,
+} from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { cn } from '@/lib/utils';
 import { Label } from '@/components/ui/label';
-import { Input } from '@/components/ui/input';
 
 export { useForm, FormProvider, useFormContext, Controller };
 export { zodResolver } from '@hookform/resolvers/zod';
 export { z } from 'zod';
 
+// ✅ This fixes: 'Form' is not exported from '@/components/ui/form'
+const Form = FormProvider;
+
 interface FormFieldProps<T extends FieldValues = FieldValues> {
   control: Control<T>;
-  name: string;
+  name: FieldPath<T>;
   render: (props: {
     field: {
       onChange: (value: any) => void;
       onBlur: () => void;
       value: any;
+      name: string;
       ref: React.Ref<any>;
     };
     fieldState: {
@@ -28,15 +41,21 @@ interface FormFieldProps<T extends FieldValues = FieldValues> {
       isTouched: boolean;
     };
     formState: FormState<T>;
-  }) => React.ReactNode;
+  }) => React.ReactElement; // ✅ Fixed: Changed from ReactNode to ReactElement
 }
 
-function FormField<T extends FieldValues = FieldValues>({ control, name, render }: FormFieldProps<T>) {
+function FormField<T extends FieldValues = FieldValues>({
+  control,
+  name,
+  render,
+}: FormFieldProps<T>) {
   return (
     <Controller
       control={control}
       name={name}
-      render={({ field, fieldState, formState }) => render({ field, fieldState, formState })}
+      render={({ field, fieldState, formState }) =>
+        render({ field, fieldState, formState })
+      }
     />
   );
 }
@@ -68,13 +87,19 @@ const FormControl = React.forwardRef<HTMLDivElement, FormControlProps>(
 );
 FormControl.displayName = 'FormControl';
 
-interface FormDescriptionProps extends React.HTMLAttributes<HTMLParagraphElement> {}
+interface FormDescriptionProps
+  extends React.HTMLAttributes<HTMLParagraphElement> {}
 
-const FormDescription = React.forwardRef<HTMLParagraphElement, FormDescriptionProps>(
-  ({ className, ...props }, ref) => (
-    <p ref={ref} className={cn('text-sm text-muted-foreground', className)} {...props} />
-  )
-);
+const FormDescription = React.forwardRef<
+  HTMLParagraphElement,
+  FormDescriptionProps
+>(({ className, ...props }, ref) => (
+  <p
+    ref={ref}
+    className={cn('text-sm text-muted-foreground', className)}
+    {...props}
+  />
+));
 FormDescription.displayName = 'FormDescription';
 
 interface FormMessageProps extends React.HTMLAttributes<HTMLParagraphElement> {
@@ -82,19 +107,24 @@ interface FormMessageProps extends React.HTMLAttributes<HTMLParagraphElement> {
 }
 
 const FormMessage = React.forwardRef<HTMLParagraphElement, FormMessageProps>(
-  ({ className, children, ...props }, ref) => (
-    <p
-      ref={ref}
-      className={cn('text-sm font-medium text-destructive', className)}
-      {...props}
-    >
-      {children}
-    </p>
-  )
+  ({ className, children, ...props }, ref) => {
+    // ✅ Fixed: Handle undefined children to prevent ReactNode assignment errors
+    if (!children) return null;
+    return (
+      <p
+        ref={ref}
+        className={cn('text-sm font-medium text-destructive', className)}
+        {...props}
+      >
+        {children}
+      </p>
+    );
+  }
 );
 FormMessage.displayName = 'FormMessage';
 
 export {
+  Form,
   FormField,
   FormItem,
   FormLabel,

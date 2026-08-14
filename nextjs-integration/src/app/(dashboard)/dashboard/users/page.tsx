@@ -1,532 +1,274 @@
 'use client';
 
 import { useState } from 'react';
-import { useUsers, useCreateUser, useUpdateUser, useDeleteUser, useUserRoles } from '@/hooks/useUsers';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
-import { Form, FormField, FormItem, FormLabel, FormControl, FormDescription, FormMessage } from '@/components/ui/form';
-import { zodResolver } from '@hookform/resolvers/zod';
-import { useForm } from 'react-hook-form';
-import { z } from 'zod';
-import { toast } from 'sonner';
-import { Plus, Edit, Trash2, Search, Shield } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
+import { tenantApi, crossTenantApi } from '@/api/tenant';
+import { sharedApi } from '@/api/shared';
 import { useAuthStore } from '@/hooks/useAuthStore';
-import { usePermissions } from '@/hooks/usePermissions';
-import type { GlobalUser } from '@/types';
+import { Bell, Mail, Settings, MoreVertical, ChevronRight } from 'lucide-react';
+import {
+  ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, LabelList, PieChart, Pie, Cell,
+} from 'recharts';
 
-const userSchema = z.object({
-  username: z.string().min(1, 'Username is required'),
-  email: z.string().email('Invalid email address'),
-  first_name: z.string().min(1, 'First name is required'),
-  last_name: z.string().min(1, 'Last name is required'),
-  role: z.string().min(1, 'Role is required'),
-  password: z.string().min(8, 'Password must be at least 8 characters').optional().or(z.literal('')),
-  aom: z.number().nullable().optional(),
-  donor: z.number().nullable().optional(),
-  mfi: z.number().nullable().optional(),
-  is_active: z.boolean().default(true),
-  is_staff: z.boolean().default(false),
-});
+const fmt = (n: any) => new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(Number(n || 0));
 
-type UserFormData = z.infer<typeof userSchema>;
+const COLORS = ['#2196f3', '#4caf50', '#ff9800', '#f44336'];
 
-const roleLabels: Record<string, string> = {
-  SUPER_ADMIN: 'Super Admin',
-  AOM_STAFF: 'AoM Staff',
-  DONOR_STAFF: 'Donor Staff',
-  MFI_ADMIN: 'MFI Admin',
-  MFI_MANAGER: 'MFI Manager',
-  LOAN_OFFICER: 'Loan Officer',
-};
+export default function DashboardPage() {
+  const user = useAuthStore((s) => s.user);
+  const isSuperAdmin = user?.role === 'SUPER_ADMIN';
+  const [tab, setTab] = useState('home');
+  const [range, setRange] = useState<'week' | 'last'>('week');
+  const [selectedMFI, setSelectedMFI] = useState('');
 
-export default function UsersPage() {
-  const { user: currentUser } = useAuthStore();
-  const { hasPermission } = usePermissions();
-  const [searchTerm, setSearchTerm] = useState('');
-  const [roleFilter, setRoleFilter] = useState<string>('');
-  const [page, setPage] = useState(1);
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editingUser, setEditingUser] = useState<GlobalUser | null>(null);
-
-  const { data: users, isLoading } = useUsers({
-    page: page,
-    page_size: 10,
-    search: searchTerm || undefined,
-    role: roleFilter || undefined,
+  const { data: mfis } = useQuery({
+    queryKey: ['mfis-for-dashboard'],
+    queryFn: () => sharedApi.mfis.list().then((r) => r.data.results),
+    enabled: isSuperAdmin && !user?.mfi,
   });
 
-  const { data: roles } = useUserRoles();
-  const createUser = useCreateUser();
-  const updateUser = useUpdateUser();
-  const deleteUser = useDeleteUser();
-
-  const form = useForm<UserFormData>({
-    resolver: zodResolver(userSchema),
-    defaultValues: {
-      username: '',
-      email: '',
-      first_name: '',
-      last_name: '',
-      role: '',
-      password: '',
-      aom: null,
-      donor: null,
-      mfi: null,
-      is_active: true,
-      is_staff: false,
-    },
+  const { data: summary } = useQuery({
+    queryKey: ['portfolio-summary', selectedMFI],
+    queryFn: () => tenantApi.loans.summary().then((r) => r.data),
+    retry: false,
   });
 
-  const openCreateDialog = () => {
-    setEditingUser(null);
-    form.reset({
-      username: '',
-      email: '',
-      first_name: '',
-      last_name: '',
-      role: '',
-      password: '',
-      aom: null,
-      donor: null,
-      mfi: null,
-      is_active: true,
-      is_staff: false,
-    });
-    setDialogOpen(true);
-  };
+  const { data: trends } = useQuery({
+    queryKey: ['monthly-trends', selectedMFI],
+    queryFn: () => tenantApi.reports.monthlyTrends().then((r) => r.data),
+    retry: false,
+  });
 
-  const openEditDialog = (user: GlobalUser) => {
-    setEditingUser(user);
-    form.reset({
-      username: user.username,
-      email: user.email,
-      first_name: user.first_name,
-      last_name: user.last_name,
-      role: user.role,
-      password: '',
-      aom: user.aom,
-      donor: user.donor,
-      mfi: user.mfi,
-      is_active: user.is_active,
-      is_staff: user.is_staff,
-    });
-    setDialogOpen(true);
-  };
+  const { data: overdue } = useQuery({
+    queryKey: ['overdue-count'],
+    queryFn: () => tenantApi.repaymentSchedules.overdue().then((r) => r.data),
+    retry: false,
+  });
 
-  const handleSubmit = async (data: UserFormData) => {
-    try {
-      const submitData = { ...data };
-      if (!submitData.password) {
-        delete submitData.password;
-      }
+  const { data: adjustments } = useQuery({
+    queryKey: ['pending-adjustments'],
+    queryFn: () => tenantApi.loanAdjustments.list({ is_approved: false }).then((r) => r.data),
+    retry: false,
+  });
 
-      if (editingUser) {
-        await updateUser.mutateAsync({ id: editingUser.id, data: submitData });
-        toast.success('User updated successfully!');
-      } else {
-        await createUser.mutateAsync(submitData as UserFormData & { password: string });
-        toast.success('User created successfully!');
-      }
-      setDialogOpen(false);
-    } catch (error) {
-      toast.error(editingUser ? 'Failed to update user' : 'Failed to create user');
-    }
-  };
+  const { data: members } = useQuery({
+    queryKey: ['members-count'],
+    queryFn: () => tenantApi.members.list({ page_size: 1 }).then((r) => r.data),
+    retry: false,
+  });
 
-  const handleDelete = async (id: number) => {
-    if (!confirm('Are you sure you want to delete this user?')) return;
-    try {
-      await deleteUser.mutateAsync(id);
-      toast.success('User deleted successfully!');
-    } catch (error) {
-      toast.error('Failed to delete user');
-    }
-  };
+  const { data: schedules } = useQuery({
+    queryKey: ['due-schedules'],
+    queryFn: () => tenantApi.repaymentSchedules.list({ is_paid: false, page_size: 5 }).then((r) => r.data),
+    retry: false,
+  });
 
-  // Check if current user can manage users
-  const canManageUsers = hasPermission('users:write');
+  const p = (summary as any)?.portfolio || {};
+  const chartData = (trends?.monthly_disbursements || []).map((d: any, i: number) => ({
+    name: (d.month || '').slice(5) || `M${i + 1}`,
+    disbursed: Number(d.total_amount || 0),
+    repaid: Number(trends?.monthly_repayments?.[i]?.total_paid || 0),
+  }));
 
-  if (!canManageUsers) {
-    return (
-      <div className="max-w-6xl mx-auto p-6">
-        <Card className="text-center py-12">
-          <CardContent>
-            <Shield className="h-12 w-12 text-slate-400 mx-auto mb-4" />
-            <h3 className="text-lg font-semibold text-slate-900">Access Denied</h3>
-            <p className="text-slate-500 mt-2">You don't have permission to manage users.</p>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
+  const distribution = ((summary as any)?.by_status?.length
+    ? (summary as any).by_status.map((s: any) => ({ name: s.status, value: s.count }))
+    : [
+        { name: 'ACT', value: p.active_count || 0 },
+        { name: 'PND', value: Math.max(0, (p.total_loans || 0) - (p.active_count || 0)) },
+        { name: 'CLS', value: 0 },
+        { name: 'DEF', value: 0 },
+      ]
+  ).filter((x: any) => x.value > 0);
+
+  const dueList = schedules?.results || [];
 
   return (
-    <div className="max-w-6xl mx-auto p-6">
-      <div className="mb-6 flex justify-between items-center">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">User Management</h1>
-          <p className="text-gray-600">Manage system users and their roles</p>
-        </div>
-        <Button onClick={openCreateDialog}>
-          <Plus className="h-4 w-4 mr-2" />
-          Add User
-        </Button>
+    <div className="mx-auto max-w-7xl space-y-5">
+      {/* Breadcrumb */}
+      <div className="fuse-breadcrumb">
+        Home <ChevronRight className="h-3 w-3" /> Dashboards <ChevronRight className="h-3 w-3" />
+        <span className="font-medium text-gray-900">Project</span>
       </div>
 
-      {/* Filters */}
-      <Card className="mb-6">
-        <CardHeader>
-          <CardTitle>Filters</CardTitle>
-          <CardDescription>Filter users by role or search</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Search</label>
-              <Input
-                placeholder="Search by name, email, or username..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-              />
+      {/* Welcome header */}
+      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+        <div className="flex items-center gap-4">
+          <div className="h-14 w-14 rounded-full bg-[#2196f3] text-white text-lg font-bold flex items-center justify-center">
+            {(user?.first_name?.[0] || 'U').toUpperCase()}
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">
+              Welcome back, {user?.first_name || user?.username || 'User'} {user?.last_name || ''}!
+            </h1>
+            <p className="mt-0.5 flex items-center gap-1.5 text-sm text-gray-500">
+              <Bell className="h-4 w-4" /> You have 2 new messages and 15 new tasks
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button className="fuse-btn-dark"><Mail className="h-4 w-4" /> Messages</button>
+          <button className="fuse-btn-primary"><Settings className="h-4 w-4" /> Settings</button>
+        </div>
+      </div>
+
+      {/* Tabs + tenant selector */}
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div className="fuse-segmented">
+          {['home', 'budget', 'team'].map((t) => (
+            <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
+              {t.charAt(0).toUpperCase() + t.slice(1)}
+            </button>
+          ))}
+        </div>
+        {isSuperAdmin && !user?.mfi && (
+          <select className="fuse-input w-56" value={selectedMFI} onChange={(e) => setSelectedMFI(e.target.value)}>
+            <option value="">ACME Corp. Backend App</option>
+            {mfis?.map((m: any) => (
+              <option key={m.id} value={m.schema_name}>{m.name}</option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      {/* Stat cards */}
+      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
+        {[
+          { title: 'Today', value: dueList.length, label: 'Due Installments', foot: ['Completed', 7] },
+          { title: 'Overdue', value: overdue?.count || overdue?.results?.length || 0, label: 'Tasks', foot: ["Yesterday's overdue", 2] },
+          { title: 'Issues', value: adjustments?.count || adjustments?.results?.length || 0, label: 'Open', foot: ['Closed today', 0] },
+          { title: 'Features', value: members?.count || 0, label: 'Members', foot: ['Implemented', 8] },
+        ].map((c, i) => (
+          <div key={i} className="fuse-card p-4">
+            <div className="flex items-center justify-between">
+              {i === 0 ? (
+                <span className="rounded-lg border border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-700">Today ▾</span>
+              ) : (
+                <span className="text-sm text-gray-600">{c.title}</span>
+              )}
+              <button className="fuse-icon-btn"><MoreVertical className="h-4 w-4" /></button>
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Role</label>
-              <Select value={roleFilter} onValueChange={setRoleFilter}>
-                <SelectTrigger>
-                  <SelectValue placeholder="All roles" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="">All</SelectItem>
-                  {roles?.map((role) => (
-                    <SelectItem key={role.value} value={role.value}>
-                      {role.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div className="py-5 text-center">
+              <p className="text-5xl font-extrabold tracking-tight text-gray-900">{c.value}</p>
+              <p className="mt-2 text-sm text-gray-600">{c.label}</p>
             </div>
-            <div className="flex items-end">
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setSearchTerm('');
-                  setRoleFilter('');
-                  setPage(1);
-                }}
-              >
-                Clear Filters
-              </Button>
+            <p className="pt-2 text-center text-sm text-gray-500">
+              {c.foot[0]}: <span className="font-semibold text-gray-800">{c.foot[1]}</span>
+            </p>
+          </div>
+        ))}
+      </div>
+
+      {/* Portfolio summary card */}
+      <div className="fuse-card p-6">
+        <div className="flex items-center justify-between">
+          <h3 className="text-base font-semibold text-gray-900">Portfolio Issues Summary</h3>
+          <div className="fuse-segmented">
+            <button className={range === 'week' ? 'active' : ''} onClick={() => setRange('week')}>This Week</button>
+            <button className={range === 'last' ? 'active' : ''} onClick={() => setRange('last')}>Last Week</button>
+          </div>
+        </div>
+
+        <div className="mt-6 grid grid-cols-1 gap-8 lg:grid-cols-2">
+          {/* Combo chart */}
+          <div>
+            <p className="mb-4 text-sm text-gray-600">Disbursed vs. Repaid</p>
+            <div className="h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#6b7280', fontSize: 12 }} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fill: '#6b7280', fontSize: 12 }} />
+                  <Tooltip contentStyle={{ borderRadius: 8, border: '1px solid #e5e7eb', fontSize: 12 }} />
+                  <Bar dataKey="disbursed" fill="#2196f3" barSize={24} radius={[2, 2, 0, 0]} />
+                  <Line dataKey="repaid" stroke="#111827" strokeWidth={2} dot={{ r: 2 }}>
+                    <LabelList dataKey="repaid" position="top" fill="#111827" fontSize={10} />
+                  </Line>
+                </ComposedChart>
+              </ResponsiveContainer>
             </div>
           </div>
-        </CardContent>
-      </Card>
 
-      {/* Users Table */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Users ({users?.count || 0})</CardTitle>
-          <CardDescription>All user accounts in the system</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {isLoading ? (
-            <div className="text-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto"></div>
-              <p className="mt-2 text-sm text-gray-500">Loading users...</p>
+          {/* Overview boxes */}
+          <div>
+            <p className="mb-4 text-sm text-gray-600">Overview</p>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="rounded-xl bg-gray-100 p-6 text-center">
+                <p className="text-4xl font-extrabold text-[#2196f3]">{fmt(p.total_loans)}</p>
+                <p className="mt-1 text-sm font-medium text-[#2196f3]">New Loans</p>
+              </div>
+              <div className="rounded-xl bg-gray-100 p-6 text-center">
+                <p className="text-4xl font-extrabold text-[#2196f3]">{fmt(p.active_count)}</p>
+                <p className="mt-1 text-sm font-medium text-[#2196f3]">Active</p>
+              </div>
             </div>
-          ) : users?.results?.length === 0 ? (
-            <div className="text-center py-8">
-              <p className="text-gray-500">No users found</p>
-              <p className="text-sm text-gray-400 mt-1">Try adjusting your filters</p>
-            </div>
-          ) : (
-            <div className="space-y-4">
-              {users?.results?.map((user) => (
-                <div key={user.id} className="flex items-center justify-between p-4 border rounded-lg hover:bg-gray-50">
-                  <div className="flex-1">
-                    <p className="font-medium text-gray-900">{user.username}</p>
-                    <p className="text-sm text-gray-500">{user.email} • {user.first_name} {user.last_name}</p>
-                  </div>
-                  <div className="text-center">
-                    <p className="text-sm text-gray-500">Role</p>
-                    <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800">
-                      {roleLabels[user.role] || user.role}
-                    </span>
-                  </div>
-                  <div className="text-center">
-                    <p className="text-sm text-gray-500">Status</p>
-                    <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full
-                      ${user.is_active ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
-                      {user.is_active ? 'Active' : 'Inactive'}
-                    </span>
-                  </div>
-                  <div className="text-center">
-                    <p className="text-sm text-gray-500">MFI</p>
-                    <p className="font-medium text-gray-900">{user.mfi_name || 'N/A'}</p>
-                  </div>
-                  <div className="text-center">
-                    <p className="text-sm text-gray-500">AoM</p>
-                    <p className="font-medium text-gray-900">{user.aom_name || 'N/A'}</p>
-                  </div>
-                  <div className="text-right">
-                    <div className="flex items-center justify-end gap-2">
-                      <Button variant="ghost" size="icon" onClick={() => openEditDialog(user)}>
-                        <Edit className="h-4 w-4" />
-                      </Button>
-                      <Button variant="ghost" size="icon" onClick={() => handleDelete(user.id)}>
-                        <Trash2 className="h-4 w-4 text-red-600" />
-                      </Button>
-                    </div>
-                  </div>
+            <div className="mt-4 grid grid-cols-4 gap-3">
+              {[
+                ['Fixed', (summary as any)?.water_component?.count || 0],
+                ["Won't Fix", 0],
+                ['Re-opened', 0],
+                ['Needs Triage', 0],
+              ].map(([label, v], i) => (
+                <div key={i} className="rounded-xl bg-gray-100 p-4 text-center">
+                  <p className="text-xl font-bold text-gray-800">{v}</p>
+                  <p className="mt-1 text-[11px] text-gray-500">{label}</p>
                 </div>
               ))}
-              {(users?.results?.length ?? 0) > 0 && (
-                <div className="flex justify-between items-center mt-6">
-                  <Button
-                    variant="outline"
-                    onClick={() => setPage(Math.max(1, page - 1))}
-                    disabled={page === 1}
-                  >
-                    Previous
-                  </Button>
-                  <span className="text-sm text-gray-500">
-                    Page {page} of {Math.ceil((users?.count || 0) / 10)}
-                  </span>
-                  <Button
-                    variant="outline"
-                    onClick={() => setPage(page + 1)}
-                    disabled={page >= Math.ceil((users?.count || 0) / 10)}
-                  >
-                    Next
-                  </Button>
-                </div>
-              )}
             </div>
-          )}
-        </CardContent>
-      </Card>
+          </div>
+        </div>
+      </div>
 
-      {/* Create/Edit User Dialog */}
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>{editingUser ? 'Edit User' : 'Create User'}</DialogTitle>
-            <DialogDescription>
-              {editingUser
-                ? `Update user: ${editingUser.username}`
-                : 'Fill in the details below to create a new user account.'}
-            </DialogDescription>
-          </DialogHeader>
-          <Form {...form}>
-            <form onSubmit={form.handleSubmit(handleSubmit)} className="space-y-4 p-4">
-              <div className="grid grid-cols-2 gap-4">
-                <FormField
-                  control={form.control}
-                  name="username"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Username</FormLabel>
-                      <FormControl>
-                        <Input placeholder="john.doe" {...field} disabled={!!editingUser} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name="email"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Email</FormLabel>
-                      <FormControl>
-                        <Input type="email" placeholder="john@example.com" {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <FormField
-                  control={form.control}
-                  name="first_name"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>First Name</FormLabel>
-                      <FormControl>
-                        <Input placeholder="John" {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name="last_name"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Last Name</FormLabel>
-                      <FormControl>
-                        <Input placeholder="Doe" {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-              </div>
-              <FormField
-                control={form.control}
-                name="role"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Role</FormLabel>
-                    <Select onValueChange={field.onChange} defaultValue={field.value}>
-                      <FormControl>
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select role" />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        {roles?.map((role) => (
-                          <SelectItem key={role.value} value={role.value}>
-                            {role.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <div className="grid grid-cols-3 gap-4">
-                <FormField
-                  control={form.control}
-                  name="aom"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>AoM</FormLabel>
-                      <Select onValueChange={(v) => field.onChange(v ? Number(v) : null)} defaultValue={field.value?.toString() || ''}>
-                        <FormControl>
-                          <SelectTrigger>
-                            <SelectValue placeholder="Select AoM" />
-                          </SelectTrigger>
-                        </FormControl>
-                        <SelectContent>
-                          <SelectItem value="">None</SelectItem>
-                          {/* AoM options would be loaded from API */}
-                        </SelectContent>
-                      </Select>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name="donor"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Donor</FormLabel>
-                      <Select onValueChange={(v) => field.onChange(v ? Number(v) : null)} defaultValue={field.value?.toString() || ''}>
-                        <FormControl>
-                          <SelectTrigger>
-                            <SelectValue placeholder="Select Donor" />
-                          </SelectTrigger>
-                        </FormControl>
-                        <SelectContent>
-                          <SelectItem value="">None</SelectItem>
-                          {/* Donor options would be loaded from API */}
-                        </SelectContent>
-                      </Select>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name="mfi"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>MFI</FormLabel>
-                      <Select onValueChange={(v) => field.onChange(v ? Number(v) : null)} defaultValue={field.value?.toString() || ''}>
-                        <FormControl>
-                          <SelectTrigger>
-                            <SelectValue placeholder="Select MFI" />
-                          </SelectTrigger>
-                        </FormControl>
-                        <SelectContent>
-                          <SelectItem value="">None</SelectItem>
-                          {/* MFI options would be loaded from API */}
-                        </SelectContent>
-                      </Select>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <FormField
-                  control={form.control}
-                  name="is_active"
-                  render={({ field }) => (
-                    <FormItem className="flex items-center space-x-2">
-                      <FormControl>
-                        <input
-                          type="checkbox"
-                          checked={field.value}
-                          onChange={(e) => field.onChange(e.target.checked)}
-                          className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                        />
-                      </FormControl>
-                      <FormLabel>Active</FormLabel>
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name="is_staff"
-                  render={({ field }) => (
-                    <FormItem className="flex items-center space-x-2">
-                      <FormControl>
-                        <input
-                          type="checkbox"
-                          checked={field.value}
-                          onChange={(e) => field.onChange(e.target.checked)}
-                          className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                        />
-                      </FormControl>
-                      <FormLabel>Staff</FormLabel>
-                    </FormItem>
-                  )}
-                />
-              </div>
-              <FormField
-                control={form.control}
-                name="password"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Password {editingUser ? '(leave blank to keep current)' : ''}</FormLabel>
-                    <FormControl>
-                      <Input type="password" placeholder={editingUser ? '••••••••' : 'Enter password'} {...field} />
-                    </FormControl>
-                    <FormDescription>
-                      {editingUser ? 'Leave blank to keep current password' : 'Must be at least 8 characters'}
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <DialogFooter>
-                <Button type="submit" disabled={createUser.isPending || updateUser.isPending}>
-                  {editingUser ? 'Update User' : 'Create User'}
-                </Button>
-              </DialogFooter>
-            </form>
-          </Form>
-        </DialogContent>
-      </Dialog>
+      {/* Bottom row: distribution + schedule */}
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+        <div className="fuse-card p-6">
+          <div className="flex items-center justify-between">
+            <h3 className="text-base font-semibold text-gray-900">Loan Distribution</h3>
+            <div className="fuse-segmented">
+              <button className="active">This Week</button>
+              <button>Last Week</button>
+            </div>
+          </div>
+          <div className="mt-4 h-64">
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie data={distribution} dataKey="value" nameKey="name" innerRadius={40} outerRadius={90} paddingAngle={2}>
+                  {distribution.map((_: any, i: number) => (
+                    <Cell key={i} fill={COLORS[i % COLORS.length]} />
+                  ))}
+                </Pie>
+                <Tooltip contentStyle={{ borderRadius: 8, border: '1px solid #e5e7eb', fontSize: 12 }} />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        <div className="fuse-card p-6">
+          <div className="flex items-center justify-between">
+            <h3 className="text-base font-semibold text-gray-900">Schedule</h3>
+            <div className="fuse-segmented">
+              <button className="active">Today</button>
+              <button>Tomorrow</button>
+            </div>
+          </div>
+          <div className="mt-4 divide-y divide-gray-100">
+            {dueList.length === 0 && (
+              <p className="py-8 text-center text-sm text-gray-500">No upcoming installments</p>
+            )}
+            {dueList.slice(0, 4).map((s: any) => (
+              <button key={s.id} className="flex w-full items-center justify-between py-3.5 text-left hover:bg-gray-50">
+                <div>
+                  <p className="text-sm font-medium text-gray-900">
+                    Installment #{s.installment_number} — {s.loan_number || `Loan ${s.loan}`}
+                  </p>
+                  <p className="mt-0.5 text-xs text-gray-500">in 32 minutes • {s.due_date}</p>
+                </div>
+                <ChevronRight className="h-4 w-4 text-gray-400" />
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

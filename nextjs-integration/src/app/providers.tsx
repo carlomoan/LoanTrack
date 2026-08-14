@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import { useState, type ReactNode } from 'react';
 import { useAuthBootstrap } from '@/hooks/useAuth';
+import { MFIProvider } from '@/context/MFIContext';
 
 function AuthBootstrap({ children }: { children: ReactNode }) {
   useAuthBootstrap();
@@ -23,10 +24,12 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <AuthBootstrap>
-        {children}
-        <Toaster position="top-right" richColors closeButton />
-      </AuthBootstrap>
+      <MFIProvider>
+        <AuthBootstrap>
+          {children}
+          <Toaster position="top-right" richColors closeButton />
+        </AuthBootstrap>
+      </MFIProvider>
     </QueryClientProvider>
   );
 }

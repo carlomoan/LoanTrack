@@ -8,6 +8,8 @@ import { motion } from 'framer-motion';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { useAuthStore } from '@/hooks/useAuthStore';
 import { useState } from 'react';
+import { useMFIContext } from '@/context/MFIContext';
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
 
 interface MFISummary {
   id: number;
@@ -18,7 +20,8 @@ interface MFISummary {
 export default function DashboardPage() {
   const user = useAuthStore((state) => state.user);
   const isSuperAdmin = user?.role === 'SUPER_ADMIN';
-  const [selectedMFI, setSelectedMFI] = useState<MFISummary | null>(null);
+  const { selectedMFI, isGlobalMode, mfis: contextMfis, setSelectedMFI, setGlobalMode, effectiveSchema } = useMFIContext();
+  const [localSelectedMFI, setLocalSelectedMFI] = useState<MFISummary | null>(selectedMFI);
 
   // For SUPER_ADMIN without MFI, fetch list of MFIs to select from
   const { data: mfis } = useQuery({
@@ -28,8 +31,21 @@ export default function DashboardPage() {
     staleTime: 5 * 60 * 1000,
   });
 
-  // Use selected MFI or user's MFI
-  const effectiveSchema = selectedMFI?.schema_name || user?.mfi_schema;
+  // Sync local state with context
+  if (selectedMFI !== localSelectedMFI) {
+    setLocalSelectedMFI(selectedMFI);
+  }
+
+  const handleMFIChange = (value: string) => {
+    if (value === 'global') {
+      // Handle global mode if needed
+      return;
+    }
+    const mfi = mfis?.find(m => m.schema_name === value);
+    if (mfi) {
+      setLocalSelectedMFI(mfi);
+    }
+  };
 
   const { data: summary, isLoading: summaryLoading, error: summaryError } = useQuery({
     queryKey: ['portfolio-summary', effectiveSchema],
@@ -52,7 +68,7 @@ export default function DashboardPage() {
 
   const isLoading = summaryLoading || trendsLoading;
 
-  if (isSuperAdmin && !user?.mfi && !selectedMFI) {
+  if (isSuperAdmin && !user?.mfi && !selectedMFI && !isGlobalMode) {
     return (
       <div className="space-y-8">
         <div>
@@ -60,10 +76,10 @@ export default function DashboardPage() {
           <p className="text-slate-500 mt-1">Select an MFI to view dashboard</p>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          {mfis?.map((mfi) => (
+          {contextMfis?.map((mfi) => (
             <div
               key={mfi.id}
-              onClick={() => setSelectedMFI(mfi)}
+              onClick={() => setLocalSelectedMFI(mfi)}
               className="fuse-card p-6 cursor-pointer hover:bg-indigo-50 transition-colors border-2 border-slate-200 hover:border-indigo-300"
             >
               <Building2 className="h-10 w-10 text-indigo-600 mb-3" />
@@ -95,19 +111,25 @@ export default function DashboardPage() {
           <p className="text-slate-500 mt-1">Real-time consolidated portfolio metrics</p>
         </div>
         {isSuperAdmin && !user?.mfi && (
-          <select
-            value={selectedMFI?.id || ''}
-            onChange={(e) => {
-              const mfi = mfis?.find(m => m.id === Number(e.target.value));
-              setSelectedMFI(mfi || null);
-            }}
-            className="fuse-input w-fit"
-          >
-            <option value="">Select MFI...</option>
-            {mfis?.map((mfi) => (
-              <option key={mfi.id} value={mfi.id}>{mfi.name}</option>
-            ))}
-          </select>
+          <div className="flex items-center gap-2">
+            <Select
+              value={isGlobalMode ? 'global' : (selectedMFI?.schema_name || '')}
+              onValueChange={(value) => {
+                if (value === 'global') {
+                  // Handle global mode
+                } else {
+                  const mfi = mfis?.find(m => m.schema_name === value);
+                  if (mfi) setLocalSelectedMFI(mfi);
+                }
+              }}
+              className="fuse-input w-fit"
+            >
+              <option value="global">Global Mode</option>
+              {contextMfis?.map((mfi) => (
+                <option key={mfi.id} value={mfi.schema_name}>{mfi.name}</option>
+              ))}
+            </Select>
+          </div>
         )}
       </motion.div>
 
