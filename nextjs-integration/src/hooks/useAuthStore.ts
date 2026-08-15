@@ -1,7 +1,8 @@
 // src/hooks/useAuthStore.ts
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { clearTokens, setTokens, setTenantSchema, clearTenantSchema, getTenantSchema } from '@/api/client';
+import { clearTokens, setTokens } from '@/api/client';
+import { useTenantContext } from '@/hooks/useTenantContext';
 import type { GlobalUser, TokenResponse } from '@/types';
 
 interface AuthState {
@@ -28,12 +29,6 @@ export const useAuthStore = create<AuthState>()(
 
       setAuth: (tokens, user) => {
         setTokens(tokens.access, tokens.refresh);
-        // Set tenant schema from user's MFI
-        if (user.mfi_schema) {
-          setTenantSchema(user.mfi_schema);
-        } else if (user.mfi) {
-          setTenantSchema(`tenant_mfi${user.mfi}`);
-        }
         set({
           accessToken: tokens.access,
           refreshToken: tokens.refresh,
@@ -44,17 +39,12 @@ export const useAuthStore = create<AuthState>()(
       },
 
       setUser: (user) => {
-        if (user.mfi_schema) {
-          setTenantSchema(user.mfi_schema);
-        } else if (user.mfi) {
-          setTenantSchema(`tenant_mfi${user.mfi}`);
-        }
         set({ user, isAuthenticated: true });
       },
 
       logout: () => {
         clearTokens();
-        clearTenantSchema();
+        useTenantContext.getState().clearSelectedMfi();
         set({
           user: null,
           accessToken: null,
@@ -67,13 +57,8 @@ export const useAuthStore = create<AuthState>()(
       hydrateAuth: () => {
         if (typeof window !== 'undefined') {
           const access = localStorage.getItem('access_token');
-          const refresh = localStorage.getItem('refresh_token');
-          const tenantSchema = localStorage.getItem('tenant_schema');
           if (access) {
-            set({ isAuthenticated: true, accessToken: access, refreshToken: refresh });
-            if (tenantSchema) {
-              setTenantSchema(tenantSchema);
-            }
+            set({ isAuthenticated: true, accessToken: access });
           }
         }
       },

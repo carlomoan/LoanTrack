@@ -320,9 +320,10 @@ credentials
 config
 
 # Google Cloud credentials
-*.json
 *.p12
 application_default_credentials.json
+gcp-*credentials*.json
+service-account*.json
 
 # Azure credentials
 *.azureprofile
@@ -338,3 +339,4 @@ pgdata/
 *-local.*
 *-dev.*
 *-override.*
+nextjs-integration/tsconfig.tsbuildinfo

@@ -1,63 +1,56 @@
+// src/components/layout/Header.tsx
 'use client';
-
-import {
-  PanelLeft, CalendarDays, Mail, Users, Star, Languages, Type,
-  Maximize2, Sun, Search, Bookmark, Bell, Building2, Globe
-} from 'lucide-react';
+import { Search, Bell, Plus, Menu } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 import { useAuthStore } from '@/hooks/useAuthStore';
-import { usePermissions } from '@/hooks/usePermissions';
-import { useMFIContext } from '@/context/MFIContext';
+import { useTenantContext } from '@/hooks/useTenantContext';
+import { isMfiStaff, canWriteTenantData } from '@/lib/permissions';
+import { TenantSwitcher } from './TenantSwitcher';
 
 export function Header() {
-  const { user } = useAuthStore();
-  const { role } = usePermissions();
-  const { selectedMFI, isGlobalMode } = useMFIContext();
-  const isSuperAdmin = role === 'SUPER_ADMIN';
+  const router = useRouter();
+  const user = useAuthStore((state) => state.user);
+  const selectedMfi = useTenantContext((state) => state.selectedMfi);
+
+  // "New Loan" only makes sense once we're actually inside a tenant
+  // context (either the user's own MFI, or one a global-role user has
+  // selected via the switcher) and their role can write tenant data.
+  const inTenantContext = isMfiStaff(user) || Boolean(selectedMfi);
+  const showNewLoan = inTenantContext && canWriteTenantData(user);
 
   return (
-    <header className="flex h-16 items-center justify-between border-b border-gray-200 bg-[#f8f9fb] px-4 md:px-6">
-      <div className="flex items-center gap-1">
-        <button className="fuse-icon-btn"><PanelLeft className="h-5 w-5" /></button>
-        <div className="ml-2 hidden md:flex items-center gap-1">
-          <button className="fuse-icon-btn"><CalendarDays className="h-5 w-5" /></button>
-          <button className="fuse-icon-btn"><Mail className="h-5 w-5" /></button>
-          <button className="fuse-icon-btn"><Users className="h-5 w-5" /></button>
-          <button className="fuse-icon-btn"><Star className="h-5 w-5 text-amber-400" /></button>
-        </div>
-      </div>
+    <header className="sticky top-0 z-10 flex items-center justify-between h-16 px-6 bg-white border-b border-slate-200 shadow-sm">
+      <div className="flex items-center gap-4 flex-1">
+        <button className="lg:hidden p-2 rounded-md text-slate-500 hover:bg-slate-100">
+          <Menu className="h-6 w-6" />
+        </button>
 
-      <div className="flex-1 flex items-center justify-center">
-        {/* MFI Context Indicator */}
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white border border-gray-200 text-sm">
-          {isSuperAdmin ? (
-            <span className="flex items-center gap-1.5 text-orange-600">
-              <Globe className="h-4 w-4" />
-              <span className="font-medium">{isGlobalMode ? 'Global Mode' : (selectedMFI?.name || 'Select MFI')}</span>
-              <span className="px-2 py-0.5 text-[10px] font-bold bg-orange-100 text-orange-700 rounded">SUPER ADMIN</span>
-            </span>
-          ) : (
-            <span className="flex items-center gap-1.5 text-blue-600">
-              <Building2 className="h-4 w-4" />
-              <span className="font-medium">{user?.mfi_name || 'MFI'}</span>
-              <span className="px-2 py-0.5 text-[10px] font-bold bg-blue-100 text-blue-700 rounded">{user?.role}</span>
-            </span>
-          )}
-        </div>
-      </div>
-
-      <div className="flex items-center gap-1">
-        <div className="relative hidden md:block w-80">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+        <div className="relative hidden md:block w-96">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
           <input
             type="text"
-            placeholder="Search loans, members, branches..."
-            className="w-full pl-10 pr-4 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#2196f3] focus:border-transparent transition-all"
+            placeholder="Search loans, members, or branches..."
+            className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
           />
         </div>
+      </div>
 
-        <button className="fuse-icon-btn relative">
+      <div className="flex items-center gap-4">
+        <TenantSwitcher />
+
+        {showNewLoan && (
+          <button
+            onClick={() => router.push('/dashboard/loans/new')}
+            className="fuse-btn-primary"
+          >
+            <Plus className="h-4 w-4" />
+            <span className="hidden sm:inline">New Loan</span>
+          </button>
+        )}
+
+        <button className="p-2 rounded-full text-slate-500 hover:bg-slate-100 relative">
           <Bell className="h-5 w-5" />
-          <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-[#2196f3]" />
+          <span className="absolute top-1 right-1 h-2.5 w-2.5 bg-red-500 rounded-full border-2 border-white"></span>
         </button>
       </div>
     </header>

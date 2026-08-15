@@ -519,10 +519,13 @@ class TenantViewSetMixin:
 
     Access by role, once a tenant has been resolved:
         SUPER_ADMIN   full read/write on any tenant.
-        AOM_STAFF     read-only, only when the tenant's MFI belongs to
-                      their own AoM.
-        DONOR_STAFF   read-only, only when the tenant's MFI is funded by
-                      their own donor (directly or via its AoM).
+        AOM_STAFF /
+        DONOR_STAFF   no access. Individual member/loan data belongs to
+                      the MFI's own staff; AoM and donor oversight goes
+                      through MFIReport (aggregate MFI-level reports)
+                      and MFIDisbursement (the wholesale AoM-to-MFI
+                      capital ledger) instead -- both public-schema
+                      endpoints, not the tenant schema.
         MFI_ADMIN /
         MFI_MANAGER   read/write, only their own MFI's tenant.
         LOAN_OFFICER  read/write except DELETE, only their own MFI's
@@ -558,21 +561,20 @@ class TenantViewSetMixin:
         if role == SUPER_ADMIN:
             return
 
-        if role == AOM_STAFF:
-            if tenant.aom_id == user.aom_id and request.method in permissions.SAFE_METHODS:
-                return
+        # AoM and Donor staff oversee the wholesale relationship (how much
+        # capital an AoM has disbursed to an MFI, and the MFI-level
+        # aggregate reports that MFI submits upward) -- never the
+        # individual members and loans an MFI's own staff manage day to
+        # day. That data belongs to the MFI's tenant schema and stays
+        # there; AoM/Donor roles reach financial oversight through
+        # MFIReport and MFIDisbursement instead, both public-schema
+        # endpoints scoped to their own organization.
+        if role in (AOM_STAFF, DONOR_STAFF):
             raise exceptions.PermissionDenied(
-                "AoM staff have read-only access to their own AoM's MFIs."
-            )
-
-        if role == DONOR_STAFF:
-            same_donor = tenant.donor_id == user.donor_id or (
-                tenant.aom_id and tenant.aom.donor_id == user.donor_id
-            )
-            if same_donor and request.method in permissions.SAFE_METHODS:
-                return
-            raise exceptions.PermissionDenied(
-                "Donor staff have read-only access to MFIs they fund."
+                "AoM and donor accounts don't have access to individual "
+                "member/loan records. Use MFI reports and disbursement "
+                "data (/api/mfi-reports/, /api/mfi-disbursements/) for "
+                "oversight instead."
             )
 
         if role in MFI_WRITE_ROLES:  # MFI_ADMIN, MFI_MANAGER

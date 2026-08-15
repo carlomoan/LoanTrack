@@ -5,10 +5,13 @@ from .models import (
     AoMReport,
     Domain,
     Donor,
+    DonorContribution,
     DonorReport,
     ExchangeRate,
     GlobalUser,
     MFI,
+    MFIDisbursement,
+    MFIDisbursementRepayment,
     MFIReport,
 )
 
@@ -216,6 +219,12 @@ class GlobalUserSerializer(serializers.ModelSerializer):
         default=None,
     )
 
+    mfi_code = serializers.CharField(
+        source="mfi.code",
+        read_only=True,
+        default=None,
+    )
+
     class Meta:
         model = GlobalUser
         fields = [
@@ -233,6 +242,7 @@ class GlobalUserSerializer(serializers.ModelSerializer):
             "mfi",
             "mfi_name",
             "mfi_schema",
+            "mfi_code",
             "is_staff",
             "is_active",
             "date_joined",
@@ -264,3 +274,90 @@ class GlobalUserSerializer(serializers.ModelSerializer):
             user.save(update_fields=["password"])
 
         return user
+
+
+# =============================================================================
+# Fund flow: Donor -> AoM -> MFI
+# =============================================================================
+
+
+class DonorContributionSerializer(serializers.ModelSerializer):
+    donor_name = serializers.CharField(source="donor.name", read_only=True)
+    aom_name = serializers.CharField(source="aom.name", read_only=True)
+
+    recorded_by_name = serializers.CharField(
+        source="recorded_by.get_full_name",
+        read_only=True,
+        default=None,
+    )
+
+    class Meta:
+        model = DonorContribution
+        fields = "__all__"
+        read_only_fields = ["id", "recorded_by", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        donor = attrs.get("donor") or getattr(self.instance, "donor", None)
+        aom = attrs.get("aom") or getattr(self.instance, "aom", None)
+        if donor and aom and aom.donor_id != donor.id:
+            raise serializers.ValidationError(
+                "This AoM's sponsoring donor does not match the selected donor."
+            )
+        return attrs
+
+
+class MFIDisbursementRepaymentSerializer(serializers.ModelSerializer):
+    remaining_amount = serializers.DecimalField(
+        max_digits=14, decimal_places=2, read_only=True
+    )
+    is_overdue = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = MFIDisbursementRepayment
+        fields = "__all__"
+        read_only_fields = [
+            "id",
+            "disbursement",
+            "installment_number",
+            "expected_principal",
+            "expected_interest",
+            "expected_total",
+            "is_paid",
+            "days_overdue",
+        ]
+
+
+class MFIDisbursementSerializer(serializers.ModelSerializer):
+    aom_name = serializers.CharField(source="aom.name", read_only=True)
+    mfi_name = serializers.CharField(source="mfi.name", read_only=True)
+
+    created_by_name = serializers.CharField(
+        source="created_by.get_full_name",
+        read_only=True,
+        default=None,
+    )
+
+    class Meta:
+        model = MFIDisbursement
+        fields = "__all__"
+        read_only_fields = [
+            "id",
+            "repaid_amount",
+            "outstanding_amount",
+            "created_by",
+            "created_at",
+            "updated_at",
+        ]
+
+    def validate(self, attrs):
+        aom = attrs.get("aom") or getattr(self.instance, "aom", None)
+        mfi = attrs.get("mfi") or getattr(self.instance, "mfi", None)
+        if aom and mfi and mfi.aom_id != aom.id:
+            raise serializers.ValidationError(
+                "This MFI does not belong to the selected AoM."
+            )
+        return attrs
+
+
+class MFIDisbursementDetailSerializer(MFIDisbursementSerializer):
+    schedule = MFIDisbursementRepaymentSerializer(many=True, read_only=True)

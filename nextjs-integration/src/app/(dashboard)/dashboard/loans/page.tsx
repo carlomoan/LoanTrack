@@ -2,17 +2,21 @@
 'use client';
 
 import { useState } from 'react';
-import { useLoans, useCreateLoan } from '@/hooks/useLoans';
+import { useRouter } from 'next/navigation';
+import { useLoans } from '@/hooks/useLoans';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
-import { toast } from 'sonner';
+import { useAuthStore } from '@/hooks/useAuthStore';
+import { canWriteTenantData } from '@/lib/permissions';
 
 export default function LoansPage() {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [page, setPage] = useState(1);
+  const router = useRouter();
+  const user = useAuthStore((state) => state.user);
 
   const { data: loans, isLoading } = useLoans({
     page: page,
@@ -21,31 +25,6 @@ export default function LoansPage() {
     status: statusFilter || undefined,
   });
 
-  const createLoan = useCreateLoan();
-
-  const handleCreateLoan = async () => {
-    try {
-      await createLoan.mutateAsync({
-        loan_number: `LOAN-${Date.now()}`,
-        member: 1,
-        branch: null,                    // ✅ Required by LoanForm
-        loan_officer: null,              // ✅ Required by LoanForm
-        product_type: 'Standard Loan',
-        disbursement_date: new Date().toISOString().split('T')[0],
-        status: 'PND',
-        water_component: false,
-        interest_rate: '10.5',           // ✅ String, not number
-        loan_term: 12,
-        loan_amount: '5000',             // ✅ String, not number
-        repaid_amount: '0',              // ✅ String, not number
-        // ✅ outstanding_amount removed — Django auto-calculates it
-      });
-      toast.success('Loan created successfully!');
-    } catch (error) {
-      toast.error('Failed to create loan');
-    }
-  };
-
   return (
     <div className="max-w-6xl mx-auto p-6">
       <div className="mb-6 flex justify-between items-center">
@@ -53,9 +32,11 @@ export default function LoansPage() {
           <h1 className="text-2xl font-bold text-gray-900">Loans Management</h1>
           <p className="text-gray-600">Manage all loans and disbursements</p>
         </div>
-        <Button onClick={handleCreateLoan} disabled={createLoan.isPending}>
-          {createLoan.isPending ? 'Creating...' : 'Create Loan'}
-        </Button>
+        {canWriteTenantData(user) && (
+          <Button onClick={() => router.push('/dashboard/loans/new')}>
+            Create Loan
+          </Button>
+        )}
       </div>
 
       {/* Filters */}

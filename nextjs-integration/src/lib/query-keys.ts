@@ -40,6 +40,16 @@ export const queryKeys = {
     donorReports: (params?: QueryParams) =>
       withParams(['shared', 'donor-reports'], params),
     donorReport: (id: number) => ['shared', 'donor-report', id] as const,
+
+    donorContributions: (params?: QueryParams) =>
+      withParams(['shared', 'donor-contributions'], params),
+
+    mfiDisbursements: (params?: QueryParams) =>
+      withParams(['shared', 'mfi-disbursements'], params),
+    mfiDisbursement: (id: number) => ['shared', 'mfi-disbursement', id] as const,
+
+    disbursementRepayments: (params?: QueryParams) =>
+      withParams(['shared', 'disbursement-repayments'], params),
   },
 
   tenant: {

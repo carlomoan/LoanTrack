@@ -175,6 +175,67 @@ export type ReportStatus =
   | 'REJECTED'
   | 'GENERATED';
 
+// =============================================================================
+// Fund flow: Donor -> AoM -> MFI
+// =============================================================================
+
+export interface DonorContribution {
+  id: number;
+  donor: number;
+  donor_name?: string;
+  aom: number;
+  aom_name?: string;
+  amount: string;
+  currency: string;
+  contribution_date: string;
+  reference?: string;
+  notes?: string;
+  recorded_by: number | null;
+  recorded_by_name?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export type DisbursementStatus = 'PND' | 'ACT' | 'RPD' | 'DEF' | 'CAN';
+
+export interface MFIDisbursement {
+  id: number;
+  aom: number;
+  aom_name?: string;
+  mfi: number;
+  mfi_name?: string;
+  principal_amount: string;
+  currency: string;
+  interest_rate: string;
+  term_months: number;
+  disbursement_date: string;
+  status: DisbursementStatus;
+  repaid_amount: string;
+  outstanding_amount: string;
+  notes?: string;
+  created_by: number | null;
+  created_by_name?: string;
+  created_at?: string;
+  updated_at?: string;
+  schedule?: MFIDisbursementRepayment[];
+}
+
+export interface MFIDisbursementRepayment {
+  id: number;
+  disbursement: number;
+  installment_number: number;
+  due_date: string;
+  expected_principal: string;
+  expected_interest: string;
+  expected_total: string;
+  actual_paid: string;
+  is_paid: boolean;
+  days_overdue: number;
+  paid_date: string | null;
+  remaining_amount?: string;
+  is_overdue?: boolean;
+}
+
 export interface MFIReport {
   id: number;
   mfi: number;

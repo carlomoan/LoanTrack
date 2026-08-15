@@ -568,8 +568,8 @@ class Loan(models.Model):
         return f"{self.loan_number} - {self.member.name}"
 
     def save(self, *args, **kwargs):
-        loan_amount = self.loan_amount or Decimal("0.00")
-        repaid_amount = self.repaid_amount or Decimal("0.00")
+        loan_amount = Decimal(str(self.loan_amount or "0"))
+        repaid_amount = Decimal(str(self.repaid_amount or "0"))
 
         outstanding = loan_amount - repaid_amount
 
@@ -647,7 +647,10 @@ class RepaymentSchedule(models.Model):
         return f"{self.loan.loan_number} - Installment {self.installment_number}"
 
     def save(self, *args, **kwargs):
-        if self.actual_paid >= self.expected_total:
+        actual_paid = Decimal(str(self.actual_paid or "0"))
+        expected_total = Decimal(str(self.expected_total or "0"))
+
+        if actual_paid >= expected_total:
             self.is_paid = True
 
             if not self.paid_date:

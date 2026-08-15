@@ -1,0 +1,31 @@
+{
+  "typeCheckingMode": "basic",
+  "exclude": [
+    "**/node_modules",
+    "**/venv",
+    "**/env",
+    "**/migrations",
+    "**/static",
+    "**/media",
+    "**/build",
+    "**/dist",
+    "**/coverage",
+    "**/logs",
+    "**/tmp",
+    "**/test",
+    "**/tests",
+    "**/spec",
+    "**/specs",
+    "**/e2e",
+    "**/cypress",
+    "**/playwright",
+    "**/storybook",
+    "**/public",
+    "**/templates",
+    "**/apps",
+    "**/project",
+    "**/workspace"
+  ],
+  "reportUnusedImports": false,
+  "typeStubPath": "node_modules/@types"
+}

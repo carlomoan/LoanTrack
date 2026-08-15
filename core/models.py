@@ -4,6 +4,7 @@ from decimal import Decimal
 from django.contrib.auth.models import AbstractUser
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from django_tenants.models import DomainMixin, TenantMixin
 from simple_history.models import HistoricalRecords
@@ -565,3 +566,303 @@ class DonorReport(models.Model):
             self.base_currency = self.donor.base_currency
 
         super().save(*args, **kwargs)
+
+
+# =============================================================================
+# Fund flow: Donor -> AoM -> MFI -> individual member
+# =============================================================================
+# The retail side (MFI lending to individual members, with its own
+# interest rate/term/repayment schedule) lives entirely in the tenant
+# schema -- see tenants.models.Loan / RepaymentSchedule. This section
+# models the wholesale side one tier up: a donor injecting capital into
+# an AoM, and the AoM re-lending that capital onward to its MFIs on its
+# own rate/term, with its own repayment schedule as the MFI pays it back.
+#
+# These live in the public schema (not a tenant schema) because they
+# describe a relationship *between* AoM and MFI as organizations, not
+# operational data belonging to one MFI's tenant -- an AoM needs to see
+# and manage its disbursements to every MFI it funds in one place.
+
+
+class DonorContribution(models.Model):
+    """
+    A capital injection from a Donor into an AoM. This is the top of the
+    fund-flow chain: money the AoM can then disburse onward to its MFIs
+    via MFIDisbursement.
+    """
+
+    donor = models.ForeignKey(
+        Donor,
+        on_delete=models.CASCADE,
+        related_name="contributions",
+    )
+
+    aom = models.ForeignKey(
+        AoM,
+        on_delete=models.CASCADE,
+        related_name="contributions",
+    )
+
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    currency = models.CharField(max_length=3, default="USD")
+
+    contribution_date = models.DateField()
+    reference = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Wire transfer reference or other external reference.",
+    )
+    notes = models.TextField(blank=True)
+
+    recorded_by = models.ForeignKey(
+        GlobalUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="recorded_donor_contributions",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        db_table = "core_donorcontribution"
+        ordering = ["-contribution_date"]
+        indexes = [
+            models.Index(fields=["donor", "aom"]),
+            models.Index(fields=["contribution_date"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.donor.name} -> {self.aom.name}: {self.amount} {self.currency}"
+
+    def clean(self):
+        # A donor can only fund an AoM it actually sponsors -- otherwise
+        # this record wouldn't reconcile against anything.
+        if self.aom_id and self.donor_id and self.aom.donor_id != self.donor_id:
+            raise ValidationError(
+                "This AoM's sponsoring donor does not match the selected donor."
+            )
+
+
+class MFIDisbursement(models.Model):
+    """
+    A wholesale loan from an AoM to one of its MFIs -- the capital the MFI
+    then re-lends to individual members at its own rate/term (tracked
+    separately, per-tenant, as tenants.models.Loan). Mirrors the shape of
+    Loan/RepaymentSchedule one tier up: principal, rate, term, and an
+    auto-generated repayment schedule the MFI pays down over time.
+    """
+
+    class DisbursementStatus(models.TextChoices):
+        PENDING = "PND", "Pending"
+        ACTIVE = "ACT", "Active"
+        REPAID = "RPD", "Repaid"
+        DEFAULTED = "DEF", "Defaulted"
+        CANCELLED = "CAN", "Cancelled"
+
+    aom = models.ForeignKey(
+        AoM,
+        on_delete=models.CASCADE,
+        related_name="disbursements",
+    )
+
+    mfi = models.ForeignKey(
+        MFI,
+        on_delete=models.CASCADE,
+        related_name="disbursements",
+    )
+
+    principal_amount = models.DecimalField(max_digits=14, decimal_places=2)
+    currency = models.CharField(max_length=3, default="USD")
+
+    # The rate the AoM charges the MFI on this wholesale loan -- distinct
+    # from, and generally lower than, the rate the MFI in turn charges its
+    # individual borrowers.
+    interest_rate = models.DecimalField(max_digits=5, decimal_places=2)
+    term_months = models.PositiveIntegerField()
+    disbursement_date = models.DateField()
+
+    status = models.CharField(
+        max_length=3,
+        choices=DisbursementStatus.choices,
+        default=DisbursementStatus.PENDING,
+    )
+
+    repaid_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    outstanding_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+
+    notes = models.TextField(blank=True)
+
+    created_by = models.ForeignKey(
+        GlobalUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_disbursements",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        db_table = "core_mfidisbursement"
+        ordering = ["-disbursement_date"]
+        indexes = [
+            models.Index(fields=["aom", "mfi"]),
+            models.Index(fields=["status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.aom.name} -> {self.mfi.name}: {self.principal_amount} {self.currency}"
+
+    def clean(self):
+        # A wholesale loan only makes sense between an AoM and one of its
+        # own MFIs.
+        if self.mfi_id and self.aom_id and self.mfi.aom_id != self.aom_id:
+            raise ValidationError(
+                "This MFI does not belong to the selected AoM."
+            )
+
+    def save(self, *args, **kwargs):
+        principal = Decimal(str(self.principal_amount or "0"))
+        repaid = Decimal(str(self.repaid_amount or "0"))
+        self.outstanding_amount = max(Decimal("0.00"), principal - repaid)
+        super().save(*args, **kwargs)
+
+    def generate_schedule(self):
+        """
+        Builds a flat-rate, equal-installment monthly repayment schedule
+        for this disbursement -- the same flat-interest style already
+        used for individual member loans in the tenant schema. Replaces
+        any existing schedule rows for this disbursement. Safe to call
+        again if the terms change before any repayment has been recorded.
+        """
+        if self.schedule.filter(actual_paid__gt=0).exists():
+            raise ValidationError(
+                "Cannot regenerate a schedule that already has repayments recorded."
+            )
+
+        self.schedule.all().delete()
+
+        principal = self.principal_amount
+        total_interest = (
+            principal * (self.interest_rate / Decimal("100")) *
+            (Decimal(self.term_months) / Decimal("12"))
+        )
+        total_due = principal + total_interest
+
+        installment_principal = (principal / self.term_months).quantize(Decimal("0.01"))
+        installment_interest = (total_interest / self.term_months).quantize(Decimal("0.01"))
+
+        rows = []
+        running_principal = Decimal("0.00")
+        running_interest = Decimal("0.00")
+
+        for i in range(1, self.term_months + 1):
+            is_last = i == self.term_months
+            due_date = _add_months(self.disbursement_date, i)
+
+            principal_i = (
+                principal - running_principal if is_last else installment_principal
+            )
+            interest_i = (
+                total_interest - running_interest if is_last else installment_interest
+            )
+
+            running_principal += principal_i
+            running_interest += interest_i
+
+            rows.append(
+                MFIDisbursementRepayment(
+                    disbursement=self,
+                    installment_number=i,
+                    due_date=due_date,
+                    expected_principal=principal_i,
+                    expected_interest=interest_i,
+                    expected_total=principal_i + interest_i,
+                )
+            )
+
+        MFIDisbursementRepayment.objects.bulk_create(rows)
+        return total_due
+
+
+def _add_months(start_date, months):
+    month_index = start_date.month - 1 + months
+    year = start_date.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(
+        start_date.day,
+        [31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28,
+         31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1],
+    )
+    return date_type(year, month, day)
+
+
+class MFIDisbursementRepayment(models.Model):
+    """
+    One installment of an MFI paying an AoM back for a wholesale
+    disbursement. Mirrors tenants.models.RepaymentSchedule's shape and
+    save()/overdue logic one tier up.
+    """
+
+    disbursement = models.ForeignKey(
+        MFIDisbursement,
+        on_delete=models.CASCADE,
+        related_name="schedule",
+    )
+
+    installment_number = models.IntegerField()
+    due_date = models.DateField()
+
+    expected_principal = models.DecimalField(max_digits=14, decimal_places=2)
+    expected_interest = models.DecimalField(max_digits=14, decimal_places=2)
+    expected_total = models.DecimalField(max_digits=14, decimal_places=2)
+
+    actual_paid = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    is_paid = models.BooleanField(default=False)
+    days_overdue = models.IntegerField(default=0)
+    paid_date = models.DateField(null=True, blank=True)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        db_table = "core_mfidisbursementrepayment"
+        ordering = ["disbursement", "installment_number"]
+        unique_together = ["disbursement", "installment_number"]
+        indexes = [
+            models.Index(fields=["due_date", "is_paid"]),
+            models.Index(fields=["days_overdue"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.disbursement} - Installment {self.installment_number}"
+
+    def save(self, *args, **kwargs):
+        actual_paid = Decimal(str(self.actual_paid or "0"))
+        expected_total = Decimal(str(self.expected_total or "0"))
+
+        if actual_paid >= expected_total:
+            self.is_paid = True
+            if not self.paid_date:
+                self.paid_date = timezone.now().date()
+
+        if self.is_paid:
+            self.days_overdue = 0
+        elif self.due_date:
+            self.days_overdue = max((timezone.now().date() - self.due_date).days, 0)
+
+        super().save(*args, **kwargs)
+
+    @property
+    def is_overdue(self):
+        return self.days_overdue > 0 and not self.is_paid
+
+    @property
+    def remaining_amount(self):
+        return self.expected_total - self.actual_paid

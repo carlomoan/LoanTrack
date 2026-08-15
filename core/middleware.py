@@ -46,12 +46,23 @@ class TenantHeaderMiddleware(TenantMainMiddleware):
                 if domain:
                     break
 
-            if domain is None:
-                raise Http404("Tenant does not exist")
+            if domain is not None:
+                request.tenant = domain.tenant
+                connection.set_tenant(request.tenant)
+                return
 
-            request.tenant = domain.tenant
-            connection.set_tenant(request.tenant)
-            return
+            # The header was present but didn't resolve to any known
+            # tenant -- fall through to the same public-schema fallback
+            # used when no header is sent at all, rather than hard-404ing
+            # the request. A client sending a stale or unrecognized
+            # subdomain (e.g. after switching environments, or a bug like
+            # sending this header on a shared/public endpoint that never
+            # needed it) shouldn't be able to take down endpoints that
+            # don't actually require tenant context. TenantViewSetMixin
+            # separately enforces that genuine tenant endpoints require a
+            # *valid* tenant, so this fallback doesn't grant access to
+            # anything -- it just stops an irrelevant or bad header from
+            # blocking public-schema requests.
 
         try:
             super().process_request(request)

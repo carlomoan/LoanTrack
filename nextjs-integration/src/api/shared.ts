@@ -4,6 +4,7 @@ import type {
   MFIReport, AoMReport, DonorReport, PaginatedResponse,
   MFIForm, ExchangeRateForm,
   Domain, // <--- ADD THIS
+  DonorContribution, MFIDisbursement, MFIDisbursementRepayment,
 } from '@/types';
 
 // Shared/Public Schema API
@@ -82,8 +83,6 @@ export const sharedApi = {
       api.delete(`/users/${id}/`),
     me: () =>
       api.get<GlobalUser>('/users/me/'),
-    roles: () =>
-      api.get<{ value: string; label: string }[]>('/users/roles/'),
   },
 
   // Exchange Rates
@@ -140,5 +139,40 @@ export const sharedApi = {
       api.patch<DonorReport>(`/donor-reports/${id}/`, data),
     delete: (id: number) =>
       api.delete(`/donor-reports/${id}/`),
+  },
+
+  // Donor Contributions -- capital a Donor has injected into an AoM
+  donorContributions: {
+    list: (params?: Record<string, any>) =>
+      api.get<PaginatedResponse<DonorContribution>>('/donor-contributions/', { params }),
+    get: (id: number) =>
+      api.get<DonorContribution>(`/donor-contributions/${id}/`),
+    create: (data: Partial<DonorContribution>) =>
+      api.post<DonorContribution>('/donor-contributions/', data),
+  },
+
+  // MFI Disbursements -- wholesale loans from an AoM to its MFIs
+  mfiDisbursements: {
+    list: (params?: Record<string, any>) =>
+      api.get<PaginatedResponse<MFIDisbursement>>('/mfi-disbursements/', { params }),
+    get: (id: number) =>
+      api.get<MFIDisbursement>(`/mfi-disbursements/${id}/`),
+    create: (data: Partial<MFIDisbursement>) =>
+      api.post<MFIDisbursement>('/mfi-disbursements/', data),
+    generateSchedule: (id: number) =>
+      api.post<{ total_due: string; disbursement: MFIDisbursement }>(
+        `/mfi-disbursements/${id}/generate-schedule/`
+      ),
+  },
+
+  // Disbursement repayment installments
+  disbursementRepayments: {
+    list: (params?: Record<string, any>) =>
+      api.get<PaginatedResponse<MFIDisbursementRepayment>>('/disbursement-repayments/', { params }),
+    recordPayment: (id: number, amount: string) =>
+      api.post<MFIDisbursementRepayment>(
+        `/disbursement-repayments/${id}/record-payment/`,
+        { amount }
+      ),
   },
 };

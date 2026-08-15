@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.db.models import Count
 from django.utils import timezone
 from django_tenants.utils import schema_context
@@ -12,10 +14,13 @@ from .permissions import (
     AoMReportPermission,
     DONOR_STAFF,
     DomainPermission,
+    DonorContributionPermission,
     DonorPermission,
     DonorReportPermission,
     ExchangeRatePermission,
     GlobalUserPermission,
+    MFIDisbursementPermission,
+    MFIDisbursementRepaymentPermission,
     MFIPermission,
     MFIReportPermission,
     SUPER_ADMIN,
@@ -41,21 +46,28 @@ from .models import (
     AoMReport,
     Domain,
     Donor,
+    DonorContribution,
     DonorReport,
     ExchangeRate,
     GlobalUser,
     MFI,
+    MFIDisbursement,
+    MFIDisbursementRepayment,
     MFIReport,
 )
 from .serializers import (
     AoMReportSerializer,
     AoMSerializer,
     DomainSerializer,
+    DonorContributionSerializer,
     DonorReportSerializer,
     DonorSerializer,
     ExchangeRateSerializer,
     GlobalUserSerializer,
     MFIDetailSerializer,
+    MFIDisbursementDetailSerializer,
+    MFIDisbursementRepaymentSerializer,
+    MFIDisbursementSerializer,
     MFIListSerializer,
     MFIReportSerializer,
 )
@@ -133,19 +145,6 @@ class GlobalUserViewSet(viewsets.ModelViewSet):
 
         serializer = self.get_serializer(request.user)
         return Response(serializer.data)
-
-    @action(detail=False, methods=["get"], url_path="roles")
-    def roles(self, request):
-        """
-        Returns the list of available user roles.
-        Used by Next.js: GET /api/users/roles/
-        """
-        from .models import GlobalUser
-        roles = [
-            {"value": choice[0], "label": choice[1]}
-            for choice in GlobalUser.Role.choices
-        ]
-        return Response(roles)
 
 
 class MFIViewSet(viewsets.ModelViewSet):
@@ -472,4 +471,151 @@ class DonorReportViewSet(viewsets.ModelViewSet):
         report.save()
 
         serializer = self.get_serializer(report)
+        return Response(serializer.data)
+
+
+# =============================================================================
+# Fund flow: Donor -> AoM -> MFI
+# =============================================================================
+
+
+class DonorContributionViewSet(viewsets.ModelViewSet):
+    """Capital a Donor has injected into an AoM."""
+
+    serializer_class = DonorContributionSerializer
+    permission_classes = [permissions.IsAuthenticated, DonorContributionPermission]
+
+    filterset_fields = ["donor", "aom"]
+    search_fields = ["donor__name", "aom__name", "reference"]
+    ordering_fields = ["contribution_date", "amount"]
+    ordering = ["-contribution_date"]
+
+    def get_queryset(self):
+        queryset = DonorContribution.objects.select_related(
+            "donor", "aom", "recorded_by"
+        ).order_by("-contribution_date")
+        return DonorContributionPermission.scope_queryset(self.request, queryset)
+
+    def perform_create(self, serializer):
+        serializer.save(recorded_by=self.request.user)
+
+
+class MFIDisbursementViewSet(viewsets.ModelViewSet):
+    """
+    A wholesale loan from an AoM to one of its MFIs -- the capital the
+    MFI re-lends onward to individual members (tracked separately, per
+    tenant, as tenants.models.Loan).
+    """
+
+    permission_classes = [permissions.IsAuthenticated, MFIDisbursementPermission]
+
+    filterset_fields = ["aom", "mfi", "status"]
+    search_fields = ["aom__name", "mfi__name"]
+    ordering_fields = ["disbursement_date", "principal_amount"]
+    ordering = ["-disbursement_date"]
+
+    def get_serializer_class(self):
+        if self.action == "retrieve":
+            return MFIDisbursementDetailSerializer
+        return MFIDisbursementSerializer
+
+    def get_queryset(self):
+        queryset = MFIDisbursement.objects.select_related(
+            "aom", "mfi", "created_by"
+        ).order_by("-disbursement_date")
+
+        if self.action == "retrieve":
+            queryset = queryset.prefetch_related("schedule")
+
+        return MFIDisbursementPermission.scope_queryset(self.request, queryset)
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+    @action(detail=True, methods=["post"], url_path="generate-schedule")
+    def generate_schedule(self, request, pk=None):
+        disbursement = self.get_object()
+
+        try:
+            total_due = disbursement.generate_schedule()
+        except Exception as exc:  # noqa: BLE001 - surfaced as a 400 either way
+            return Response(
+                {"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        disbursement.status = MFIDisbursement.DisbursementStatus.ACTIVE
+        disbursement.save(update_fields=["status"])
+
+        serializer = MFIDisbursementDetailSerializer(disbursement)
+        return Response(
+            {"total_due": total_due, "disbursement": serializer.data}
+        )
+
+
+class MFIDisbursementRepaymentViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Repayment schedule for a wholesale disbursement. Read-only through
+    the standard list/retrieve actions; recording an actual payment goes
+    through the dedicated `record_payment` action so the amount and date
+    are validated together rather than allowing an arbitrary PATCH.
+    """
+
+    serializer_class = MFIDisbursementRepaymentSerializer
+    permission_classes = [
+        permissions.IsAuthenticated,
+        MFIDisbursementRepaymentPermission,
+    ]
+
+    filterset_fields = ["disbursement", "is_paid"]
+    ordering_fields = ["due_date", "installment_number"]
+    ordering = ["disbursement", "installment_number"]
+
+    def get_queryset(self):
+        queryset = MFIDisbursementRepayment.objects.select_related(
+            "disbursement", "disbursement__aom", "disbursement__mfi"
+        ).order_by("disbursement", "installment_number")
+        return MFIDisbursementRepaymentPermission.scope_queryset(
+            self.request, queryset
+        )
+
+    @action(detail=True, methods=["post"], url_path="record-payment")
+    def record_payment(self, request, pk=None):
+        installment = self.get_object()
+        role = get_role(request)
+
+        # Recording that the MFI has paid is the AoM's bookkeeping act
+        # (they're confirming money arrived), not the MFI's -- an MFI
+        # marking its own debt as paid with no counterparty confirmation
+        # would defeat the point of tracking this at all.
+        if role not in (SUPER_ADMIN, AOM_STAFF):
+            raise PermissionDenied(
+                "Only the AoM that issued this disbursement can record a payment against it."
+            )
+
+        try:
+            amount = Decimal(str(request.data.get("amount", "0")))
+        except Exception:
+            return Response(
+                {"detail": "amount must be a number."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if amount <= 0:
+            return Response(
+                {"detail": "amount must be greater than zero."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        installment.actual_paid = (installment.actual_paid or Decimal("0")) + amount
+        installment.save()
+
+        disbursement = installment.disbursement
+        disbursement.repaid_amount = (
+            disbursement.repaid_amount or Decimal("0")
+        ) + amount
+        if disbursement.outstanding_amount - amount <= 0:
+            disbursement.status = MFIDisbursement.DisbursementStatus.REPAID
+        disbursement.save()
+
+        serializer = self.get_serializer(installment)
         return Response(serializer.data)

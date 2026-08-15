@@ -389,3 +389,152 @@ class DonorReportPermission(ReportPermission):
         if role == DONOR_STAFF:
             return obj.donor_id == user.donor_id
         return False
+
+
+# =============================================================================
+# Fund flow: Donor -> AoM -> MFI
+# =============================================================================
+# These describe the wholesale layer above individual lending: a donor
+# funding an AoM, and an AoM re-lending that capital to its MFIs.
+# MFI-role accounts get READ-ONLY visibility into their own MFI's
+# disbursements (they need to know what they owe upward) but never edit
+# the AoM's ledger -- setting wholesale terms is the AoM's decision, not
+# the MFI's.
+
+
+class DonorContributionPermission(permissions.BasePermission):
+    """
+    SUPER_ADMIN: full CRUD. DONOR_STAFF: read/write contributions from
+    their own donor. AOM_STAFF: read contributions made to their own AoM
+    (so they can see what capital they actually have to disburse) but
+    never edit -- that's the donor's record of what they gave. MFI roles:
+    no access; this is above their level entirely.
+    """
+
+    def has_permission(self, request, view):
+        role = get_role(request)
+        if role == SUPER_ADMIN:
+            return True
+        if role == DONOR_STAFF:
+            return True
+        if role == AOM_STAFF:
+            return request.method in SAFE_METHODS
+        return False
+
+    def has_object_permission(self, request, view, obj):
+        role = get_role(request)
+        user = request.user
+        if role == SUPER_ADMIN:
+            return True
+        if role == DONOR_STAFF:
+            return obj.donor_id == user.donor_id
+        if role == AOM_STAFF:
+            return request.method in SAFE_METHODS and obj.aom_id == user.aom_id
+        return False
+
+    @classmethod
+    def scope_queryset(cls, request, queryset):
+        role = get_role(request)
+        user = request.user
+        if role == SUPER_ADMIN:
+            return queryset
+        if role == DONOR_STAFF:
+            return queryset.filter(donor_id=user.donor_id)
+        if role == AOM_STAFF:
+            return queryset.filter(aom_id=user.aom_id)
+        return queryset.none()
+
+
+class MFIDisbursementPermission(permissions.BasePermission):
+    """
+    SUPER_ADMIN: full CRUD. AOM_STAFF: read/write disbursements from
+    their own AoM to its MFIs -- this is how the AoM actually re-lends
+    donor capital onward. DONOR_STAFF: read disbursements funded by
+    AoMs their donor sponsors (oversight of where their money ended up).
+    MFI_ADMIN / MFI_MANAGER: read-only on disbursements to their own MFI
+    (they need to know what's outstanding and due, not edit the terms).
+    LOAN_OFFICER: no access -- this is financial/strategic, not the
+    operational individual-lending work loan officers do.
+    """
+
+    def has_permission(self, request, view):
+        role = get_role(request)
+        if role in (SUPER_ADMIN, AOM_STAFF):
+            return True
+        if role == DONOR_STAFF or role in MFI_WRITE_ROLES:
+            return request.method in SAFE_METHODS
+        return False
+
+    def has_object_permission(self, request, view, obj):
+        role = get_role(request)
+        user = request.user
+        if role == SUPER_ADMIN:
+            return True
+        if role == AOM_STAFF:
+            return obj.aom_id == user.aom_id
+        if role == DONOR_STAFF:
+            return request.method in SAFE_METHODS and (
+                obj.aom.donor_id == user.donor_id
+            )
+        if role in MFI_WRITE_ROLES:
+            return request.method in SAFE_METHODS and obj.mfi_id == user.mfi_id
+        return False
+
+    @classmethod
+    def scope_queryset(cls, request, queryset):
+        role = get_role(request)
+        user = request.user
+        if role == SUPER_ADMIN:
+            return queryset
+        if role == AOM_STAFF:
+            return queryset.filter(aom_id=user.aom_id)
+        if role == DONOR_STAFF:
+            return queryset.filter(aom__donor_id=user.donor_id)
+        if role in MFI_WRITE_ROLES:
+            return queryset.filter(mfi_id=user.mfi_id)
+        return queryset.none()
+
+
+class MFIDisbursementRepaymentPermission(permissions.BasePermission):
+    """Same scoping as MFIDisbursementPermission, traced through the parent disbursement."""
+
+    def has_permission(self, request, view):
+        role = get_role(request)
+        if role in (SUPER_ADMIN, AOM_STAFF):
+            return True
+        if role == DONOR_STAFF or role in MFI_WRITE_ROLES:
+            return request.method in SAFE_METHODS
+        return False
+
+    def has_object_permission(self, request, view, obj):
+        role = get_role(request)
+        user = request.user
+        if role == SUPER_ADMIN:
+            return True
+        if role == AOM_STAFF:
+            return obj.disbursement.aom_id == user.aom_id
+        if role == DONOR_STAFF:
+            return (
+                request.method in SAFE_METHODS
+                and obj.disbursement.aom.donor_id == user.donor_id
+            )
+        if role in MFI_WRITE_ROLES:
+            return (
+                request.method in SAFE_METHODS
+                and obj.disbursement.mfi_id == user.mfi_id
+            )
+        return False
+
+    @classmethod
+    def scope_queryset(cls, request, queryset):
+        role = get_role(request)
+        user = request.user
+        if role == SUPER_ADMIN:
+            return queryset
+        if role == AOM_STAFF:
+            return queryset.filter(disbursement__aom_id=user.aom_id)
+        if role == DONOR_STAFF:
+            return queryset.filter(disbursement__aom__donor_id=user.donor_id)
+        if role in MFI_WRITE_ROLES:
+            return queryset.filter(disbursement__mfi_id=user.mfi_id)
+        return queryset.none()

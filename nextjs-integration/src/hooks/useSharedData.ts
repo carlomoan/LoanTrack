@@ -5,11 +5,14 @@ import { queryKeys } from '@/lib/query-keys';
 import type {
   AoM,
   Donor,
+  DonorContribution,
   Domain,
   ExchangeRate,
   ExchangeRateForm,
   GlobalUser,
   MFI,
+  MFIDisbursement,
+  MFIDisbursementRepayment,
   MFIForm,
   MFIReport,
   AoMReport,
@@ -483,6 +486,83 @@ export const useApproveDonorReport = () => {
       queryClient.invalidateQueries({
         queryKey: queryKeys.shared.donorReport(id),
       });
+    },
+  });
+};
+
+// =============================================================================
+// Fund flow: Donor -> AoM -> MFI
+// =============================================================================
+
+export const useDonorContributions = (params?: QueryParams) =>
+  useQuery({
+    queryKey: queryKeys.shared.donorContributions(params),
+    queryFn: async () => (await sharedApi.donorContributions.list(params)).data,
+    staleTime: TEN_MINUTES,
+  });
+
+export const useCreateDonorContribution = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: Partial<DonorContribution>) =>
+      sharedApi.donorContributions.create(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['shared', 'donor-contributions'] });
+    },
+  });
+};
+
+export const useMFIDisbursements = (params?: QueryParams) =>
+  useQuery({
+    queryKey: queryKeys.shared.mfiDisbursements(params),
+    queryFn: async () => (await sharedApi.mfiDisbursements.list(params)).data,
+    staleTime: TEN_MINUTES,
+  });
+
+export const useMFIDisbursement = (id: number) =>
+  useQuery({
+    queryKey: queryKeys.shared.mfiDisbursement(id),
+    queryFn: async () => (await sharedApi.mfiDisbursements.get(id)).data,
+    enabled: !!id,
+  });
+
+export const useCreateMFIDisbursement = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: Partial<MFIDisbursement>) =>
+      sharedApi.mfiDisbursements.create(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['shared', 'mfi-disbursements'] });
+    },
+  });
+};
+
+export const useGenerateDisbursementSchedule = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => sharedApi.mfiDisbursements.generateSchedule(id),
+    onSuccess: (_data, id) => {
+      queryClient.invalidateQueries({ queryKey: ['shared', 'mfi-disbursements'] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.shared.mfiDisbursement(id) });
+    },
+  });
+};
+
+export const useDisbursementRepayments = (params?: QueryParams) =>
+  useQuery({
+    queryKey: queryKeys.shared.disbursementRepayments(params),
+    queryFn: async () => (await sharedApi.disbursementRepayments.list(params)).data,
+    enabled: !!params?.disbursement,
+  });
+
+export const useRecordDisbursementPayment = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, amount }: { id: number; amount: string }) =>
+      sharedApi.disbursementRepayments.recordPayment(id, amount),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['shared', 'disbursement-repayments'] });
+      queryClient.invalidateQueries({ queryKey: ['shared', 'mfi-disbursements'] });
     },
   });
 };
