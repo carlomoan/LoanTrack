@@ -4,63 +4,56 @@
 
 @layer base {
   :root {
-    --fuse-blue: 33 150 243; /* #2196F3 */
+    /* NiceAdmin primary -- violet-blue */
+    --nice-primary: 105 108 255; /* #696cff */
+    --nice-primary-hover: 133 109 255; /* #8571ff */
   }
   body {
-    @apply bg-[#f5f6fa] text-gray-900 antialiased;
+    @apply bg-[#f4f6fa] text-gray-900 antialiased;
   }
   ::-webkit-scrollbar { width: 6px; height: 6px; }
-  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }
+  ::-webkit-scrollbar-thumb { background: #d3d6e4; border-radius: 999px; }
 }
 
 @layer components {
-  /* Cards */
+  /* Cards -- white, rounded, very soft shadow like NiceAdmin's .card */
   .fuse-card {
-    @apply bg-white rounded-xl border border-gray-200 shadow-[0_1px_2px_rgba(0,0,0,0.04)];
+    @apply bg-white rounded-xl border border-gray-200/70 shadow-[0_2px_6px_rgba(140,152,164,0.08)];
   }
 
   /* Buttons */
   .fuse-btn-primary {
-    @apply inline-flex items-center gap-2 rounded-lg bg-[#2196f3] hover:bg-[#1e88e5] text-white text-sm font-medium px-4 py-2 transition-colors;
+    @apply inline-flex items-center gap-2 rounded-lg bg-[#696cff] hover:bg-[#8571ff] text-white text-sm font-medium px-4 py-2 shadow-sm transition-colors;
   }
   .fuse-btn-dark {
-    @apply inline-flex items-center gap-2 rounded-lg bg-gray-900 hover:bg-black text-white text-sm font-medium px-4 py-2 transition-colors;
+    @apply inline-flex items-center gap-2 rounded-lg bg-gray-800 hover:bg-gray-900 text-white text-sm font-medium px-4 py-2 transition-colors;
   }
 
   /* Topbar icon button */
   .fuse-icon-btn {
-    @apply p-2 rounded-md text-gray-500 hover:bg-gray-200/70 hover:text-gray-800 transition-colors;
+    @apply relative p-2 rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors;
   }
 
-  /* Segmented control (This Week / Last Week) */
-  .fuse-segmented {
-    @apply inline-flex items-center rounded-lg bg-gray-200/80 p-0.5;
-  }
-  .fuse-segmented button {
-    @apply px-3 py-1.5 text-xs font-medium text-gray-600 rounded-md hover:text-gray-900 transition-colors;
-  }
-  .fuse-segmented button.active {
-    @apply bg-white text-gray-900 shadow-sm;
-  }
-
-  /* Breadcrumb pill */
+  /* Breadcrumb pill (NiceAdmin shows a breadcrumb above page content) */
   .fuse-breadcrumb {
-    @apply inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs text-gray-600;
+    @apply inline-flex items-center gap-1.5 text-sm text-gray-500;
   }
+  .fuse-breadcrumb a { @apply hover:text-[#696cff]; }
+  .fuse-breadcrumb .current { @apply text-gray-900 font-medium; }
 
-  /* Sidebar */
+  /* Sidebar -- light theme, grouped sections, active pill with left accent */
   .fuse-nav-item {
-    @apply flex items-center gap-3 w-full px-4 py-2.5 text-sm text-gray-600 rounded-lg hover:bg-gray-200/60 hover:text-gray-900 transition-colors;
+    @apply flex items-center gap-3 w-full px-4 py-2.5 text-sm text-gray-600 rounded-lg hover:bg-[#696cff]/[0.06] hover:text-[#696cff] transition-colors;
   }
   .fuse-nav-item.active {
-    @apply bg-gray-200/80 text-gray-900 font-medium;
+    @apply bg-[#696cff] text-white font-medium shadow-[0_2px_8px_rgba(105,108,255,0.35)];
   }
-  .fuse-nav-item.active svg { @apply text-[#2196f3]; }
+  .fuse-nav-item.active svg { @apply text-white; }
 
-  .fuse-section-title { @apply text-sm font-medium text-[#2196f3]; }
-  .fuse-section-sub { @apply text-xs text-gray-500 mt-0.5; }
+  .fuse-section-title { @apply px-4 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wider text-gray-400; }
+  .fuse-section-sub { @apply hidden; }
 
   .fuse-input {
-    @apply bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#2196f3]/50 focus:border-[#2196f3];
+    @apply bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#696cff]/40 focus:border-[#696cff];
   }
 }

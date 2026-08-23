@@ -1,6 +1,8 @@
 'use client';
 
+import { useRouter } from 'next/navigation';
 import { Card, CardContent } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { useMFIDisbursements } from '@/hooks/useSharedData';
 import type { MFIDisbursement } from '@/types';
@@ -15,6 +17,7 @@ const statusVariant = (s: MFIDisbursement['status']) =>
  * MFI for these roles -- no id param needed here.
  */
 export default function FundingPage() {
+  const router = useRouter();
   const { data, isLoading } = useMFIDisbursements();
 
   return (
@@ -30,7 +33,7 @@ export default function FundingPage() {
 
       {isLoading ? (
         <div className="text-center py-8">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto"></div>
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-violet-600 mx-auto"></div>
         </div>
       ) : data?.results?.length === 0 ? (
         <div className="text-center py-8 text-sm text-slate-500">
@@ -52,7 +55,18 @@ export default function FundingPage() {
                     Outstanding: <span className="font-medium text-slate-700">{d.outstanding_amount} {d.currency}</span>
                   </p>
                 </div>
-                <Badge variant={statusVariant(d.status)}>{d.status}</Badge>
+                <div className="flex items-center gap-2">
+                  <Badge variant={statusVariant(d.status)}>{d.status}</Badge>
+                  {d.status !== 'PND' && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => router.push(`/dashboard/organizations/disbursements/${d.id}`)}
+                    >
+                      View Schedule
+                    </Button>
+                  )}
+                </div>
               </CardContent>
             </Card>
           ))}

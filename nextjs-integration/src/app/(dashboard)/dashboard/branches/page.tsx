@@ -5,12 +5,14 @@ import { useBranches } from '@/hooks/useBranches';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { useRouter } from 'next/navigation';
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
 
 export default function BranchesPage() {
   const [searchTerm, setSearchTerm] = useState('');
   const [regionFilter, setRegionFilter] = useState<string>('');
   const [page, setPage] = useState(1);
+  const router = useRouter();
 
   const { data: branches, isLoading } = useBranches({
     page: page,
@@ -86,7 +88,7 @@ export default function BranchesPage() {
         <CardContent>
           {isLoading ? (
             <div className="text-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto"></div>
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-violet-600 mx-auto"></div>
               <p className="mt-2 text-sm text-gray-500">Loading branches...</p>
             </div>
           ) : branches?.results?.length === 0 ? (

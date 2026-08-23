@@ -42,3 +42,15 @@ export const useApproveLoanAdjustment = () => {
     },
   });
 };
+
+export const useRejectLoanAdjustment = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: number; reason?: string }) =>
+      tenantApi.loanAdjustments.reject(id, reason),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tenant', 'loanAdjustments'] });
+      queryClient.invalidateQueries({ queryKey: ['tenant', 'loans'] });
+    },
+  });
+};

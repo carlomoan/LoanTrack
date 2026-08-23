@@ -1,16 +1,37 @@
 'use client';
 
 import { useState } from 'react';
-import { useMembers } from '@/hooks/useMembers';
+import { useRouter } from 'next/navigation';
+import { Plus, Eye, Trash2 } from 'lucide-react';
+import { toast } from 'sonner';
+import { useMembers, useDeleteMember } from '@/hooks/useMembers';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
+import { useAuthStore } from '@/hooks/useAuthStore';
+import { showApiError } from '@/lib/api-errors';
+import { canWriteTenantData, canDeleteTenantData } from '@/lib/permissions';
 
 export default function MembersPage() {
+  const router = useRouter();
+  const user = useAuthStore((state) => state.user);
+  const canWrite = canWriteTenantData(user);
+  const canDelete = canDeleteTenantData(user);
+  const deleteMember = useDeleteMember();
   const [searchTerm, setSearchTerm] = useState('');
   const [genderFilter, setGenderFilter] = useState<string>('');
   const [page, setPage] = useState(1);
+
+  const handleDelete = async (id: number) => {
+    if (!confirm('Delete this member? This cannot be undone.')) return;
+    try {
+      await deleteMember.mutateAsync(id);
+      toast.success('Member deleted');
+    } catch (e) {
+      showApiError(e, 'Failed to delete member');
+    }
+  };
 
   const { data: members, isLoading } = useMembers({
     page: page,
@@ -21,9 +42,16 @@ export default function MembersPage() {
 
   return (
     <div className="max-w-6xl mx-auto p-6">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">Members Management</h1>
-        <p className="text-gray-600">Manage all borrowers and members in the system</p>
+      <div className="mb-6 flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Members Management</h1>
+          <p className="text-gray-600">Manage all borrowers and members in the system</p>
+        </div>
+        {canWrite && (
+          <Button onClick={() => router.push('/dashboard/members/new')}>
+            <Plus className="h-4 w-4 mr-1" /> New Member
+          </Button>
+        )}
       </div>
 
       {/* Filters */}
@@ -85,7 +113,7 @@ export default function MembersPage() {
         <CardContent>
           {isLoading ? (
             <div className="text-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto"></div>
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-violet-600 mx-auto"></div>
               <p className="mt-2 text-sm text-gray-500">Loading members...</p>
             </div>
           ) : members?.results?.length === 0 ? (
@@ -130,6 +158,28 @@ export default function MembersPage() {
                     <p className="font-medium text-gray-900">
                       {member.joined_date ? new Date(member.joined_date).toLocaleDateString() : 'N/A'}
                     </p>
+                  </div>
+                  {/* Role-gated row actions */}
+                  <div className="flex items-center gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      title="View loans"
+                      onClick={() => router.push(`/dashboard/loans?member=${member.id}`)}
+                    >
+                      <Eye className="h-4 w-4" />
+                    </Button>
+                    {canDelete && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        title="Delete member"
+                        onClick={() => handleDelete(member.id)}
+                        disabled={deleteMember.isPending}
+                      >
+                        <Trash2 className="h-4 w-4 text-red-600" />
+                      </Button>
+                    )}
                   </div>
                 </div>
               ))}

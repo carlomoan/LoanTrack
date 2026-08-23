@@ -3,7 +3,7 @@ import logging
 from django.contrib.auth import get_user_model
 from django.db.models.signals import post_save
 from django.dispatch import receiver
-from django_tenants.utils import schema_context
+from django_tenants.utils import get_public_schema_name, schema_context
 
 from .models import MFI
 
@@ -52,9 +52,43 @@ def create_default_admin_user(instance: MFI):
     )
 
 
+def create_default_domain(instance: MFI):
+    """
+    Registers the domain the frontend's X-Tenant-Subdomain header (or a
+    real hostname, in production) resolves to this MFI's schema through.
+
+    Without this, an MFI is created and its schema exists, but nothing
+    can ever route a request to it -- every tenant-scoped write (Region,
+    Branch, Member, Loan, all of it) fails, because
+    TenantHeaderMiddleware has no Domain row to match the header against
+    and falls back to the public schema, where TenantViewSetMixin
+    correctly (but unhelpfully, from the user's side) rejects it as "not
+    an MFI tenant context".
+    """
+    from .models import Domain
+
+    domain, created = Domain.objects.get_or_create(
+        tenant=instance,
+        domain=instance.schema_name,
+        defaults={"is_primary": True},
+    )
+    if created:
+        logger.info(
+            f"Created domain '{domain.domain}' for tenant: {instance.schema_name}"
+        )
+    return domain
+
+
 def initialize_tenant_defaults(instance: MFI):
     """
-    Initializes default tenant data inside the tenant schema.
+    Initializes default tenant data inside the tenant schema (default
+    region/district/ward/street/branch/loan officer) plus the
+    public-schema admin user and domain.
+
+    Callers MUST ensure the tenant's schema already exists (i.e. call
+    this after MFI.save() has fully returned, not from within a
+    post_save signal on MFI -- see setup_new_tenant below for why that
+    ordering matters).
     """
 
     from tenants.models import (
@@ -66,10 +100,9 @@ def initialize_tenant_defaults(instance: MFI):
         Ward,
     )
 
-    # Create shared/global admin user outside tenant schema context
     create_default_admin_user(instance)
+    create_default_domain(instance)
 
-    # Create tenant-specific default data
     with schema_context(instance.schema_name):
         region, _ = Region.objects.get_or_create(
             name="Default Region",
@@ -122,8 +155,24 @@ def initialize_tenant_defaults(instance: MFI):
 @receiver(post_save, sender=MFI)
 def setup_new_tenant(sender, instance: MFI, created: bool, **kwargs):
     """
-    Handles MFI creation and initializes tenant defaults.
+    Runs on every MFI save, including the very first one that creates
+    it. Deliberately does ONLY public-schema-safe work here (admin user,
+    domain) -- both are unconditionally safe regardless of whether the
+    tenant's own schema exists yet.
+
+    It must NOT attempt anything inside the tenant's own schema
+    (Region/Branch/etc.): TenantMixin.save() calls super().save() --
+    which is what fires this signal -- BEFORE it calls
+    self.create_schema(). That means this signal always runs while the
+    new tenant's schema and tables do not exist yet, so any attempt to
+    touch them here fails every time, not intermittently. The
+    tenant-schema seeding happens explicitly in MFIViewSet.perform_create
+    (and the create_schema/initialize_tenant actions), which run after
+    MFI.save() has fully returned and the schema is guaranteed to exist.
     """
+
+    if instance.schema_name == get_public_schema_name():
+        return
 
     if not created or kwargs.get("raw", False):
         return
@@ -132,19 +181,9 @@ def setup_new_tenant(sender, instance: MFI, created: bool, **kwargs):
         return
 
     try:
-        initialize_tenant_defaults(instance)
-    except Exception as exc:
-        logger.error(
-            f"Failed to setup default data for tenant {instance.schema_name}: {exc}",
-            exc_info=True,
+        create_default_admin_user(instance)
+        create_default_domain(instance)
+    except Exception:
+        logger.exception(
+            f"Failed to create default admin user/domain for tenant: {instance.schema_name}"
         )
-        from django_tenants.utils import get_public_schema_name
-
-        @receiver(post_save, sender=MFI)
-        def setup_new_tenant(sender, instance, created, **kwargs):
-            # Skip initialization for the public schema — it doesn't have tenant tables
-            if instance.schema_name == get_public_schema_name():
-                return
-
-            if created:
-                initialize_tenant_defaults(instance)

@@ -2,17 +2,23 @@
 
 import { useState } from 'react';
 import { useAuthStore } from '@/hooks/useAuthStore';
-import { useMFIReports, useGenerateMFIReport } from '@/hooks/useReports';
+import { useMFIReports, useGenerateMFIReport, usePortfolioSummary } from '@/hooks/useReports';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
 import { toast } from 'sonner';
+
+const STATUS_LABELS: Record<string, string> = {
+  ACT: 'Active', CLS: 'Closed', DEF: 'Defaulted', PND: 'Pending',
+};
 
 export default function ReportsPage() {
   const { user } = useAuthStore();
   const [selectedPeriod, setSelectedPeriod] = useState<string>('');
 
   const { data: mfiReports, isLoading: reportsLoading } = useMFIReports();
+  const { data: portfolio, isLoading: portfolioLoading } = usePortfolioSummary();
   const generateMFIReport = useGenerateMFIReport();
 
   const handleGenerateReport = async () => {
@@ -46,6 +52,72 @@ export default function ReportsPage() {
         <h1 className="text-2xl font-bold text-gray-900">Reports & Analytics</h1>
         <p className="text-gray-600">Generate and view MFI performance reports</p>
       </div>
+
+      {!portfolioLoading && portfolio && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Loans by Status</CardTitle>
+              <CardDescription>How many individuals have taken loans, and their current status.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {portfolio.status_breakdown.length === 0 ? (
+                <p className="text-sm text-gray-400">No loans recorded yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {portfolio.status_breakdown.map((row) => (
+                    <div key={row.status} className="flex items-center justify-between text-sm">
+                      <span className="text-gray-600">{STATUS_LABELS[row.status] ?? row.status}</span>
+                      <span className="font-medium text-gray-900">
+                        {row.count} loans &middot; {Number(row.amount ?? 0).toLocaleString()} disbursed &middot; {Number(row.outstanding ?? 0).toLocaleString()} outstanding
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Interest Repayment</CardTitle>
+              <CardDescription>Of closed loans, how many were repaid with interest vs had interest waived.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {portfolio.interest_repayment_breakdown.closed_loans_total === 0 ? (
+                <p className="text-sm text-gray-400">No closed loans yet.</p>
+              ) : (
+                <div className="space-y-2 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-600">Repaid with interest</span>
+                    <span className="font-medium text-gray-900">
+                      {portfolio.interest_repayment_breakdown.repaid_with_interest_count} of {portfolio.interest_repayment_breakdown.closed_loans_total}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-600">Interest waived</span>
+                    <span className="font-medium text-gray-900">
+                      {portfolio.interest_repayment_breakdown.repaid_interest_waived_count} of {portfolio.interest_repayment_breakdown.closed_loans_total}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between pt-2 border-t border-gray-100">
+                    <span className="text-gray-600">Interest collected</span>
+                    <span className="font-medium text-gray-900">
+                      {portfolio.interest_repayment_breakdown.interest_collected.toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-600">Principal collected</span>
+                    <span className="font-medium text-gray-900">
+                      {portfolio.interest_repayment_breakdown.principal_collected.toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Generate Report Card */}
@@ -92,7 +164,7 @@ export default function ReportsPage() {
           <CardContent>
             {reportsLoading ? (
               <div className="text-center py-8">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto"></div>
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-violet-600 mx-auto"></div>
                 <p className="mt-2 text-sm text-gray-500">Loading reports...</p>
               </div>
             ) : mfiReports?.results?.length === 0 ? (

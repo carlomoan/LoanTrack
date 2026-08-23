@@ -315,3 +315,277 @@ class CrossTenantReportScopingTests(TransactionTestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 0)
+
+
+class ActivityFeedTests(TransactionTestCase):
+    """
+    Proves the audit trail feed (/api/tenant/activity/) returns real
+    change history -- correct change types, correct field-level diffs,
+    scoped to the caller's own MFI like every other tenant endpoint --
+    rather than just not crashing.
+    """
+
+    def setUp(self):
+        connection.set_schema_to_public()
+        suffix = self._testMethodName[-20:]
+
+        self.aom = AoM.objects.create(
+            name=f"Activity AoM {suffix}",
+            code=f"ACTAOM{suffix}"[:20],
+            contact_email="a@example.com",
+        )
+
+        self.mfi_a = MFI(
+            name=f"Activity MFI A {suffix}",
+            registration_number=f"ACT-A-{suffix}",
+            email="a@example.com",
+            phone="000",
+            address="addr",
+            aom=self.aom,
+        )
+        self.mfi_a.save()
+        Domain.objects.create(
+            tenant=self.mfi_a, domain=self.mfi_a.schema_name, is_primary=True
+        )
+
+        self.mfi_b = MFI(
+            name=f"Activity MFI B {suffix}",
+            registration_number=f"ACT-B-{suffix}",
+            email="b@example.com",
+            phone="000",
+            address="addr",
+            aom=self.aom,
+        )
+        self.mfi_b.save()
+        Domain.objects.create(
+            tenant=self.mfi_b, domain=self.mfi_b.schema_name, is_primary=True
+        )
+
+        self.officer_a = User.objects.create_user(
+            username=f"activity_officer_{suffix}",
+            password="pw",
+            role=User.Role.LOAN_OFFICER,
+            mfi=self.mfi_a,
+        )
+
+    def tearDown(self):
+        connection.set_schema_to_public()
+        self.mfi_a.delete(force_drop=True)
+        self.mfi_b.delete(force_drop=True)
+
+    def _client_for(self, user, tenant_subdomain):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        client.credentials(HTTP_X_TENANT_SUBDOMAIN=tenant_subdomain)
+        return client
+
+    def test_branch_creation_and_update_appear_with_correct_change_types(self):
+        from django_tenants.utils import schema_context
+
+        with schema_context(self.mfi_a.schema_name):
+            from tenants.models import Branch
+
+            branch = Branch.objects.create(name="Head Office", code="HQ")
+            branch.name = "Renamed Office"
+            branch.save()
+
+        client = self._client_for(self.officer_a, self.mfi_a.schema_name)
+        response = client.get("/api/tenant/activity/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        branch_entries = [
+            row for row in response.data["results"] if row["model"] == "Branch"
+        ]
+        self.assertEqual(len(branch_entries), 2)
+
+        # Most recent first.
+        self.assertEqual(branch_entries[0]["change_type"], "changed")
+        self.assertIn("name", branch_entries[0]["changed_fields"])
+        self.assertEqual(branch_entries[1]["change_type"], "created")
+
+    def test_changed_by_reflects_the_authenticated_user(self):
+        from django_tenants.utils import schema_context
+
+        with schema_context(self.mfi_a.schema_name):
+            from tenants.models import Branch
+
+            # Simulate a request-scoped save by setting the history
+            # user explicitly, the way simple_history's middleware would
+            # for a real API call.
+            branch = Branch(name="Attributed Branch", code="ATB")
+            branch._history_user = self.officer_a
+            branch.save()
+
+        client = self._client_for(self.officer_a, self.mfi_a.schema_name)
+        response = client.get("/api/tenant/activity/")
+        entries = [
+            row for row in response.data["results"]
+            if row["model"] == "Branch" and row["object_repr"] == "Attributed Branch"
+        ]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["changed_by"], self.officer_a.username)
+
+    def test_pagination_params_are_respected(self):
+        from django_tenants.utils import schema_context
+
+        with schema_context(self.mfi_a.schema_name):
+            from tenants.models import Branch
+
+            for i in range(5):
+                Branch.objects.create(name=f"Branch {i}", code=f"BR{i}")
+
+        client = self._client_for(self.officer_a, self.mfi_a.schema_name)
+        response = client.get("/api/tenant/activity/", {"page": 1, "page_size": 2})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["results"]), 2)
+        self.assertEqual(response.data["page"], 1)
+        self.assertEqual(response.data["page_size"], 2)
+        self.assertGreaterEqual(response.data["count"], 5)
+
+    def test_activity_feed_respects_tenant_isolation(self):
+        # Same rule as every other tenant endpoint: officer_a belongs to
+        # mfi_a and must not see mfi_b's activity feed.
+        client = self._client_for(self.officer_a, self.mfi_b.schema_name)
+        response = client.get("/api/tenant/activity/")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class LoanNumberGenerationTests(TransactionTestCase):
+    """
+    Proves the auto-generated loan number format: first 3 letters of the
+    MFI's name (uppercase) + YYMMDD + a 3-digit counter that resets daily,
+    e.g. "Public" on 2026-08-17 -> "PUB260817-001".
+
+    Creates and drops its own tenant per test method (not shared across
+    the class) -- TransactionTestCase runs an automatic flush after every
+    test method, and that flush conflicts with a still-present tenant
+    schema's historical tables (which have a cross-schema FK to
+    core_globaluser). The schema must be fully dropped, via tearDown,
+    before that flush runs.
+    """
+
+    def setUp(self):
+        connection.set_schema_to_public()
+
+        import uuid
+
+        unique = uuid.uuid4().hex[:8]
+
+        self.aom = AoM.objects.create(
+            name=f"LoanNum AoM {unique}", code=f"LNAOM{unique}", contact_email="a@example.com"
+        )
+        self.mfi = MFI(
+            name=f"Public {unique}",
+            registration_number=f"LN-REG-{unique}",
+            email="m@example.com",
+            phone="000",
+            address="addr",
+            aom=self.aom,
+        )
+        self.mfi.save()
+        # Domain is auto-created by the post_save signal now (this is
+        # exactly the fix that made "Region fail to save" work) -- no
+        # need to create it manually here.
+
+    def tearDown(self):
+        connection.set_schema_to_public()
+        self.mfi.delete(force_drop=True)
+
+    def _make_member(self, member_id):
+        from tenants.models import Member
+
+        return Member.objects.create(
+            member_id=member_id,
+            name="Test Borrower",
+            gender="F",
+            borrower_type="IND",
+        )
+
+    def test_generated_loan_number_matches_expected_format(self):
+        from datetime import date
+        from django_tenants.utils import schema_context
+        from tenants.models import Loan
+
+        with schema_context(self.mfi.schema_name):
+            member = self._make_member("LN-FMT-001")
+            loan = Loan.objects.create(
+                member=member,
+                product_type="Standard",
+                disbursement_date=date.today(),
+                interest_rate="10.00",
+                loan_term=12,
+                loan_amount="1000.00",
+            )
+
+        today = date.today()
+        expected_prefix = f"PUB{today.strftime('%y%m%d')}-"
+        self.assertTrue(loan.loan_number.startswith(expected_prefix))
+
+    def test_counter_increments_within_the_same_day(self):
+        from datetime import date
+        from django_tenants.utils import schema_context
+        from tenants.models import Loan
+
+        with schema_context(self.mfi.schema_name):
+            member = self._make_member("LN-CTR-001")
+            before_count = Loan.all_objects.count()
+
+            loan1 = Loan.objects.create(
+                member=member, product_type="Standard", disbursement_date=date.today(),
+                interest_rate="10.00", loan_term=12, loan_amount="1000.00",
+            )
+            loan2 = Loan.objects.create(
+                member=member, product_type="Standard", disbursement_date=date.today(),
+                interest_rate="10.00", loan_term=12, loan_amount="2000.00",
+            )
+
+        self.assertNotEqual(loan1.loan_number, loan2.loan_number)
+        num1 = int(loan1.loan_number.rsplit("-", 1)[1])
+        num2 = int(loan2.loan_number.rsplit("-", 1)[1])
+        self.assertEqual(num2, num1 + 1)
+        self.assertEqual(num1, before_count + 1)
+
+    def test_manually_supplied_loan_number_is_respected_not_overwritten(self):
+        from datetime import date
+        from django_tenants.utils import schema_context
+        from tenants.models import Loan
+
+        with schema_context(self.mfi.schema_name):
+            member = self._make_member("LN-MAN-001")
+            loan = Loan.objects.create(
+                member=member, product_type="Standard", disbursement_date=date.today(),
+                interest_rate="10.00", loan_term=12, loan_amount="1000.00",
+                loan_number="LEGACY-CSV-IMPORT-001",
+            )
+
+        self.assertEqual(loan.loan_number, "LEGACY-CSV-IMPORT-001")
+
+    def test_loan_number_generation_via_real_api_request(self):
+        member_admin = User.objects.create_user(
+            username="loannum_api_admin",
+            password="pw",
+            role=User.Role.MFI_ADMIN,
+            mfi=self.mfi,
+        )
+
+        from django_tenants.utils import schema_context
+        with schema_context(self.mfi.schema_name):
+            member = self._make_member("LN-API-001")
+
+        client = APIClient()
+        client.force_authenticate(user=member_admin)
+        client.credentials(HTTP_X_TENANT_SUBDOMAIN=self.mfi.schema_name)
+
+        response = client.post(
+            "/api/tenant/loans/",
+            {
+                "member": member.id,
+                "product_type": "Standard",
+                "disbursement_date": "2026-08-17",
+                "interest_rate": "10.00",
+                "loan_term": 12,
+                "loan_amount": "1000.00",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data["loan_number"].startswith("PUB"))

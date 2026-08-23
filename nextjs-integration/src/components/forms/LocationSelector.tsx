@@ -12,13 +12,13 @@ export function LocationSelector({ onLocationChange }: { onLocationChange: (fiel
   // Fetch Regions
   const { data: regions } = useQuery({
     queryKey: ['tenant', 'regions'],
-    queryFn: () => tenantApi.regions.list().then(res => res.data),
+    queryFn: () => tenantApi.regions.list().then(res => res.data.results),
   });
 
   // Fetch Districts based on selected Region
   const { data: districts } = useQuery({
     queryKey: ['tenant', 'districts', regionId],
-    queryFn: () => tenantApi.districts.list({ region: regionId }).then(res => res.data),
+    queryFn: () => tenantApi.districts.list({ region: regionId }).then(res => res.data.results),
     enabled: !!regionId, // Only run query if regionId is selected
   });
 

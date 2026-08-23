@@ -709,3 +709,14 @@ export const useCachedReport = (
     enabled: Boolean(entityId) && Boolean(period),
     staleTime: FIVE_MINUTES,
   });
+
+// =============================================================================
+// Activity / Audit Trail
+// =============================================================================
+
+export const useActivity = (params?: QueryParams) =>
+  useQuery({
+    queryKey: queryKeys.tenant.activity(params),
+    queryFn: async () => (await tenantApi.activity.list(params)).data,
+    staleTime: ONE_MINUTE,
+  });

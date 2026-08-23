@@ -45,9 +45,17 @@ SAFE_METHODS = permissions.SAFE_METHODS
 
 
 def get_role(request):
+    """
+    Resolve the caller's role. A Django-level superuser (created via
+    `createsuperuser`, which leaves `role` at its model default) is treated
+    as SUPER_ADMIN -- otherwise the account that owns the system can't
+    administer it.
+    """
     user = request.user
     if not user or not user.is_authenticated:
         return None
+    if getattr(user, "is_superuser", False):
+        return SUPER_ADMIN
     return getattr(user, "role", None)
 
 
@@ -156,7 +164,7 @@ class MFIPermission(permissions.BasePermission):
         if role == DONOR_STAFF:
             return request.method in SAFE_METHODS and (
                 obj.donor_id == request.user.donor_id
-                or (obj.aom_id and obj.aom.donor_id == request.user.donor_id)
+                or (obj.aom_id and obj.aom.donors.filter(id=request.user.donor_id).exists())
             )
         if role in MFI_STAFF_ROLES:
             return request.method in SAFE_METHODS and obj.id == request.user.mfi_id
@@ -174,7 +182,7 @@ class MFIPermission(permissions.BasePermission):
 
             return queryset.filter(
                 Q(donor_id=request.user.donor_id)
-                | Q(aom__donor_id=request.user.donor_id)
+                | Q(aom__donors=request.user.donor_id)
             )
         if role in MFI_STAFF_ROLES:
             return queryset.filter(id=request.user.mfi_id)
@@ -214,7 +222,7 @@ class GlobalUserPermission(permissions.BasePermission):
         if role == DONOR_STAFF:
             return request.method in SAFE_METHODS and (
                 obj.donor_id == user.donor_id
-                or (obj.aom_id and obj.aom.donor_id == user.donor_id)
+                or (obj.aom_id and obj.aom.donors.filter(id=user.donor_id).exists())
                 or (obj.mfi_id and obj.mfi.donor_id == user.donor_id)
             )
         if role == MFI_ADMIN:
@@ -243,7 +251,7 @@ class GlobalUserPermission(permissions.BasePermission):
 
             return queryset.filter(
                 Q(donor_id=user.donor_id)
-                | Q(aom__donor_id=user.donor_id)
+                | Q(aom__donors=user.donor_id)
                 | Q(mfi__donor_id=user.donor_id)
             )
         if role in MFI_STAFF_ROLES:
@@ -335,7 +343,7 @@ class MFIReportPermission(ReportPermission):
         if role == AOM_STAFF:
             return [{"mfi__aom_id": user.aom_id}]
         if role == DONOR_STAFF:
-            return [{"mfi__donor_id": user.donor_id}, {"mfi__aom__donor_id": user.donor_id}]
+            return [{"mfi__donor_id": user.donor_id}, {"mfi__aom__donors": user.donor_id}]
         if role in MFI_STAFF_ROLES:
             return [{"mfi_id": user.mfi_id}]
         return None
@@ -348,7 +356,7 @@ class MFIReportPermission(ReportPermission):
         if role == DONOR_STAFF:
             return request.method in SAFE_METHODS and (
                 obj.mfi.donor_id == user.donor_id
-                or (obj.mfi.aom_id and obj.mfi.aom.donor_id == user.donor_id)
+                or (obj.mfi.aom_id and obj.mfi.aom.donors.filter(id=user.donor_id).exists())
             )
         if role in MFI_STAFF_ROLES:
             return obj.mfi_id == user.mfi_id
@@ -362,7 +370,7 @@ class AoMReportPermission(ReportPermission):
         if role == AOM_STAFF:
             return [{"aom_id": user.aom_id}]
         if role == DONOR_STAFF:
-            return [{"aom__donor_id": user.donor_id}]
+            return [{"aom__donors": user.donor_id}]
         return None
 
     def owns_object(self, request, obj):
@@ -371,7 +379,7 @@ class AoMReportPermission(ReportPermission):
         if role == AOM_STAFF:
             return obj.aom_id == user.aom_id
         if role == DONOR_STAFF:
-            return request.method in SAFE_METHODS and obj.aom.donor_id == user.donor_id
+            return request.method in SAFE_METHODS and obj.aom.donors.filter(id=user.donor_id).exists()
         return False
 
 
@@ -474,7 +482,7 @@ class MFIDisbursementPermission(permissions.BasePermission):
             return obj.aom_id == user.aom_id
         if role == DONOR_STAFF:
             return request.method in SAFE_METHODS and (
-                obj.aom.donor_id == user.donor_id
+                obj.aom.donors.filter(id=user.donor_id).exists()
             )
         if role in MFI_WRITE_ROLES:
             return request.method in SAFE_METHODS and obj.mfi_id == user.mfi_id
@@ -489,7 +497,7 @@ class MFIDisbursementPermission(permissions.BasePermission):
         if role == AOM_STAFF:
             return queryset.filter(aom_id=user.aom_id)
         if role == DONOR_STAFF:
-            return queryset.filter(aom__donor_id=user.donor_id)
+            return queryset.filter(aom__donors=user.donor_id)
         if role in MFI_WRITE_ROLES:
             return queryset.filter(mfi_id=user.mfi_id)
         return queryset.none()
@@ -516,7 +524,7 @@ class MFIDisbursementRepaymentPermission(permissions.BasePermission):
         if role == DONOR_STAFF:
             return (
                 request.method in SAFE_METHODS
-                and obj.disbursement.aom.donor_id == user.donor_id
+                and obj.disbursement.aom.donors.filter(id=user.donor_id).exists()
             )
         if role in MFI_WRITE_ROLES:
             return (
@@ -534,7 +542,7 @@ class MFIDisbursementRepaymentPermission(permissions.BasePermission):
         if role == AOM_STAFF:
             return queryset.filter(disbursement__aom_id=user.aom_id)
         if role == DONOR_STAFF:
-            return queryset.filter(disbursement__aom__donor_id=user.donor_id)
+            return queryset.filter(disbursement__aom__donors=user.donor_id)
         if role in MFI_WRITE_ROLES:
             return queryset.filter(disbursement__mfi_id=user.mfi_id)
         return queryset.none()

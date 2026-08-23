@@ -49,7 +49,7 @@ export function PermissionGuard({
               <Shield className="h-12 w-12 text-slate-400 mx-auto mb-4" />
               <h3 className="text-lg font-semibold text-slate-900">Access Denied</h3>
               <p className="text-slate-500 mt-2">
-                You don't have permission to access this page.
+                You don&apos;t have permission to access this page.
               </p>
             </CardContent>
           </Card>

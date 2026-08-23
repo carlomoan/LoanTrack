@@ -101,6 +101,9 @@ export const queryKeys = {
       withParams(['tenant', 'reports', 'portfolio-summary'], params),
     monthlyTrends: (params?: QueryParams) =>
       withParams(['tenant', 'reports', 'monthly-trends'], params),
+
+    activity: (params?: QueryParams) =>
+      withParams(['tenant', 'activity'], params),
   },
 
   crossTenant: {

@@ -96,3 +96,22 @@ export const canViewDisbursements = (user: GlobalUser | null) =>
 
 export const canRecordDisbursementPayment = (user: GlobalUser | null) =>
   hasRole(user, ROLES.SUPER_ADMIN, ROLES.AOM_STAFF);
+
+// --- Tenant workflow actions --------------------------------------------
+
+/** Approve a pending loan (PND -> ACT). Separation of duty: the officer who created it shouldn't approve their own; MFI admins/managers and super admin do. */
+export const canApproveLoans = (user: GlobalUser | null) =>
+  hasRole(user, ROLES.SUPER_ADMIN, ROLES.MFI_ADMIN, ROLES.MFI_MANAGER);
+
+/** Record a repayment against an installment. Loan officers do this daily. */
+export const canRecordRepayment = canWriteTenantData;
+
+/** Approve a loan adjustment request. Same separation-of-duty rule as loans. */
+export const canApproveLoanAdjustments = (user: GlobalUser | null) =>
+  hasRole(user, ROLES.SUPER_ADMIN, ROLES.MFI_ADMIN, ROLES.MFI_MANAGER);
+
+/** Generate a repayment schedule for an approved loan. */
+export const canGenerateSchedule = canWriteTenantData;
+
+/** Soft-delete/restore tenant records. Mirrors backend delete rules. */
+export const canSoftDeleteRecords = canDeleteTenantData;

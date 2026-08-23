@@ -20,10 +20,18 @@ import type {
   MFIReportPayload,
   TenantPortfolioSummaryResponse,
   MonthlyTrends,
+  ActivityFeedResponse,
+  GeocodeReverseResult,
 } from '@/types';
 
 // Tenant/Isolated Schema API
 export const tenantApi = {
+  // Map reverse geocoding (Django fetches coordinates from OSM)
+  geocode: {
+    reverse: (lat: number, lng: number) =>
+      api.get<GeocodeReverseResult>('/tenant/geocode/reverse/', { params: { lat, lng } }),
+  },
+
   // Geography
   regions: {
     list: (params?: Record<string, any>) =>
@@ -141,6 +149,12 @@ export const tenantApi = {
       api.get(`/tenant/loans/${id}/history/`),
     generateSchedule: (id: number) =>
       api.post(`/tenant/loans/${id}/generate_schedule/`),
+    approve: (id: number) =>
+      api.post(`/tenant/loans/${id}/approve/`),
+    close: (id: number) =>
+      api.post(`/tenant/loans/${id}/close/`),
+    markDefaulted: (id: number) =>
+      api.post(`/tenant/loans/${id}/mark_defaulted/`),
     summary: (params?: Record<string, any>) =>
       api.get('/tenant/loans/summary/', { params }),
   },
@@ -203,6 +217,8 @@ export const tenantApi = {
       api.delete(`/tenant/loan-adjustments/${id}/`),
     approve: (id: number) =>
       api.post(`/tenant/loan-adjustments/${id}/approve/`),
+    reject: (id: number, reason?: string) =>
+      api.post(`/tenant/loan-adjustments/${id}/reject/`, { reason }),
   },
 
   // Loan Documents
@@ -249,6 +265,12 @@ export const tenantApi = {
         '/tenant/reports/generate_mfi_report/',
         { period }
       ),
+  },
+
+  // Audit trail -- who changed what, and when
+  activity: {
+    list: (params?: Record<string, any>) =>
+      api.get<ActivityFeedResponse>('/tenant/activity/', { params }),
   },
 };
 

@@ -36,7 +36,7 @@ interface FormFieldProps<T extends FieldValues = FieldValues> {
       ref: React.Ref<any>;
     };
     fieldState: {
-      error: { message?: string } | undefined;
+      error?: { message?: string } | undefined;
       isDirty: boolean;
       isTouched: boolean;
     };

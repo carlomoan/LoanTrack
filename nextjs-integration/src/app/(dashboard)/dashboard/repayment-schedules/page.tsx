@@ -1,16 +1,50 @@
 'use client';
 
 import { useState } from 'react';
-import { useRepaymentSchedules, useOverdueSchedules } from '@/hooks/useRepaymentSchedules';
+import { toast } from 'sonner';
+import { Banknote } from 'lucide-react';
+import { useRepaymentSchedules, useOverdueSchedules, useRecordPayment } from '@/hooks/useRepaymentSchedules';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
+import { useAuthStore } from '@/hooks/useAuthStore';
+import { showApiError } from '@/lib/api-errors';
+import { canRecordRepayment } from '@/lib/permissions';
+import { formatCurrency, formatNumber } from '@/utils/helpers';
+import { useDefaultCurrency } from '@/hooks/useSystemSettings';
 
 export default function RepaymentSchedulesPage() {
+  const user = useAuthStore((state) => state.user);
+  const canRecord = canRecordRepayment(user);
+  const currency = useDefaultCurrency();
+  const [payingId, setPayingId] = useState<number | null>(null);
+  const [payAmount, setPayAmount] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [page, setPage] = useState(1);
+
+  const recordPayment = useRecordPayment();
+
+  const openPayForm = (id: number, remaining: string | number) => {
+    setPayingId(id);
+    setPayAmount(String(remaining || ''));
+  };
+
+  const submitPayment = async (id: number) => {
+    if (!payAmount || parseFloat(payAmount) <= 0) {
+      toast.error('Enter a payment amount greater than zero');
+      return;
+    }
+    try {
+      await recordPayment.mutateAsync({ id, amount: payAmount });
+      toast.success('Payment recorded');
+      setPayingId(null);
+      setPayAmount('');
+    } catch (e) {
+      showApiError(e, 'Failed to record payment');
+    }
+  };
 
   const { data: schedules, isLoading } = useRepaymentSchedules({
     page: page,
@@ -72,7 +106,10 @@ export default function RepaymentSchedulesPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              ${schedules?.results?.reduce((sum, s) => sum + parseFloat(s.expected_total || '0'), 0).toLocaleString() || '0'}
+              {formatCurrency(
+                schedules?.results?.reduce((sum, s) => sum + parseFloat(s.expected_total || '0'), 0) || 0,
+                currency
+              )}
             </div>
           </CardContent>
         </Card>
@@ -136,7 +173,7 @@ export default function RepaymentSchedulesPage() {
         <CardContent>
           {isLoading ? (
             <div className="text-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto"></div>
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-violet-600 mx-auto"></div>
               <p className="mt-2 text-sm text-gray-500">Loading schedules...</p>
             </div>
           ) : schedules?.results?.length === 0 ? (
@@ -163,13 +200,13 @@ export default function RepaymentSchedulesPage() {
                   <div className="text-center">
                     <p className="text-sm text-gray-500">Expected Total</p>
                     <p className="font-medium text-gray-900">
-                      ${parseFloat(schedule.expected_total || '0').toLocaleString()}
+                      {formatCurrency(schedule.expected_total || 0, currency)}
                     </p>
                   </div>
                   <div className="text-center">
                     <p className="text-sm text-gray-500">Actual Paid</p>
                     <p className="font-medium text-gray-900">
-                      ${parseFloat(schedule.actual_paid || '0').toLocaleString()}
+                      {formatCurrency(schedule.actual_paid || 0, currency)}
                     </p>
                   </div>
                   <div className="text-center">
@@ -188,9 +225,45 @@ export default function RepaymentSchedulesPage() {
                   <div className="text-right">
                     <p className="text-sm text-gray-500">Remaining</p>
                     <p className="font-medium text-gray-900">
-                      ${Number(schedule.remaining_amount || 0).toLocaleString()}
+                      {formatCurrency(schedule.remaining_amount || 0, currency)}
                     </p>
                   </div>
+
+                  {/* Role-gated repayment action */}
+                  {canRecord && !schedule.is_paid && (
+                    <div className="flex items-center gap-2">
+                      {payingId === schedule.id ? (
+                        <>
+                          <Input
+                            className="w-28"
+                            type="number"
+                            step="0.01"
+                            value={payAmount}
+                            onChange={(e) => setPayAmount(e.target.value)}
+                            placeholder="Amount"
+                          />
+                          <Button
+                            size="sm"
+                            onClick={() => submitPayment(schedule.id)}
+                            disabled={recordPayment.isPending}
+                          >
+                            Save
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => setPayingId(null)}>
+                            Cancel
+                          </Button>
+                        </>
+                      ) : (
+                        <Button
+                          size="sm"
+                          onClick={() => openPayForm(schedule.id, schedule.remaining_amount ?? 0)}
+                          title="Record a payment"
+                        >
+                          <Banknote className="h-4 w-4 mr-1" /> Pay
+                        </Button>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
               {(schedules?.results?.length ?? 0) > 0 && (

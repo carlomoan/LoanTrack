@@ -14,6 +14,10 @@ from .views import (
     MFIDisbursementViewSet,
     MFIReportViewSet,
     MFIViewSet,
+    NotificationsViewSet,
+    PasswordResetConfirmView,
+    PasswordResetRequestView,
+    SystemSettingsView,
 )
 
 router = DefaultRouter(trailing_slash=True)
@@ -36,7 +40,19 @@ router.register(
     MFIDisbursementRepaymentViewSet,
     basename="disbursementrepayment",
 )
+router.register(r"notifications", NotificationsViewSet, basename="notification")
 
 urlpatterns = [
     path("", include(router.urls)),
+    path(
+        "password-reset/",
+        PasswordResetRequestView.as_view(),
+        name="password-reset-request",
+    ),
+    path(
+        "password-reset-confirm/",
+        PasswordResetConfirmView.as_view(),
+        name="password-reset-confirm",
+    ),
+    path("system-settings/", SystemSettingsView.as_view(), name="system-settings"),
 ]

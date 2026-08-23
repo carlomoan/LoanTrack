@@ -13,7 +13,7 @@ import {
 
 const fmt = (n: any) => new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(Number(n || 0));
 
-const COLORS = ['#2196f3', '#4caf50', '#ff9800', '#f44336'];
+const COLORS = ['#696cff', '#4caf50', '#ff9800', '#f44336'];
 
 export default function DashboardPage() {
   const user = useAuthStore((s) => s.user);
@@ -94,7 +94,7 @@ export default function DashboardPage() {
       {/* Welcome header */}
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div className="flex items-center gap-4">
-          <div className="h-14 w-14 rounded-full bg-[#2196f3] text-white text-lg font-bold flex items-center justify-center">
+          <div className="h-14 w-14 rounded-full bg-[#696cff] text-white text-lg font-bold flex items-center justify-center">
             {(user?.first_name?.[0] || 'U').toUpperCase()}
           </div>
           <div>
@@ -180,7 +180,7 @@ export default function DashboardPage() {
                   <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#6b7280', fontSize: 12 }} />
                   <YAxis axisLine={false} tickLine={false} tick={{ fill: '#6b7280', fontSize: 12 }} />
                   <Tooltip contentStyle={{ borderRadius: 8, border: '1px solid #e5e7eb', fontSize: 12 }} />
-                  <Bar dataKey="disbursed" fill="#2196f3" barSize={24} radius={[2, 2, 0, 0]} />
+                  <Bar dataKey="disbursed" fill="#696cff" barSize={24} radius={[2, 2, 0, 0]} />
                   <Line dataKey="repaid" stroke="#111827" strokeWidth={2} dot={{ r: 2 }}>
                     <LabelList dataKey="repaid" position="top" fill="#111827" fontSize={10} />
                   </Line>
@@ -194,12 +194,12 @@ export default function DashboardPage() {
             <p className="mb-4 text-sm text-gray-600">Overview</p>
             <div className="grid grid-cols-2 gap-4">
               <div className="rounded-xl bg-gray-100 p-6 text-center">
-                <p className="text-4xl font-extrabold text-[#2196f3]">{fmt(p.total_loans)}</p>
-                <p className="mt-1 text-sm font-medium text-[#2196f3]">New Loans</p>
+                <p className="text-4xl font-extrabold text-[#696cff]">{fmt(p.total_loans)}</p>
+                <p className="mt-1 text-sm font-medium text-[#696cff]">New Loans</p>
               </div>
               <div className="rounded-xl bg-gray-100 p-6 text-center">
-                <p className="text-4xl font-extrabold text-[#2196f3]">{fmt(p.active_count)}</p>
-                <p className="mt-1 text-sm font-medium text-[#2196f3]">Active</p>
+                <p className="text-4xl font-extrabold text-[#696cff]">{fmt(p.active_count)}</p>
+                <p className="mt-1 text-sm font-medium text-[#696cff]">Active</p>
               </div>
             </div>
             <div className="mt-4 grid grid-cols-4 gap-3">

@@ -10,7 +10,7 @@ function Badge({ className, variant = 'default', ...props }: BadgeProps) {
     'inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors';
 
   const variants: Record<string, string> = {
-    default: 'border-transparent bg-indigo-100 text-indigo-800',
+    default: 'border-transparent bg-violet-100 text-violet-800',
     secondary: 'border-transparent bg-slate-100 text-slate-700',
     destructive: 'border-transparent bg-red-100 text-red-800',
     outline: 'border-slate-200 text-slate-700',

@@ -173,6 +173,7 @@ REST_FRAMEWORK = {
         "donor": "100/hour",
         "csv_upload": "10/hour",
         "report_generation": "20/hour",
+        "password_reset": "5/hour",
     },
 }
 
@@ -184,6 +185,25 @@ SIMPLE_JWT = {
     "BLACKLIST_AFTER_ROTATION": True,
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
+
+# Email
+# Defaults to printing emails to the console -- there's no SMTP provider
+# wired up yet, so this is the honest default rather than silently
+# failing to send. Set EMAIL_BACKEND / EMAIL_HOST / etc. via environment
+# variables once a real provider (SES, SendGrid, Postmark...) is chosen.
+EMAIL_BACKEND = os.getenv(
+    "EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend"
+)
+EMAIL_HOST = os.getenv("EMAIL_HOST", "")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "true").lower() == "true"
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "no-reply@loantrack.local")
+
+# Used to build the password reset link sent by email -- the frontend
+# route that actually shows the "set a new password" form.
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 # CORS
 CORS_ALLOWED_ORIGINS = [

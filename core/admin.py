@@ -15,10 +15,14 @@ class DonorAdmin(admin.ModelAdmin):
 
 @admin.register(AoM)
 class AoMAdmin(admin.ModelAdmin):
-    list_display = ['name', 'code', 'donor', 'contact_email', 'created_at']
-    list_filter = ['donor']
+    list_display = ['name', 'code', 'donor_names', 'contact_email', 'created_at']
+    list_filter = ['donors']
     search_fields = ['name', 'code']
     readonly_fields = ['created_at', 'updated_at']
+
+    def donor_names(self, obj):
+        return ', '.join(d.name for d in obj.donors.all()) or '-'
+    donor_names.short_description = 'Donors'
 
 
 @admin.register(GlobalUser)
@@ -90,7 +94,7 @@ class MFIReportAdmin(admin.ModelAdmin):
 @admin.register(AoMReport)
 class AoMReportAdmin(admin.ModelAdmin):
     list_display = ['aom', 'period', 'status', 'base_currency', 'generated_at']
-    list_filter = ['status', 'aom__donor', 'period']
+    list_filter = ['status', 'aom__donors', 'period']
     search_fields = ['aom__name', 'aom__code']
     readonly_fields = ['generated_at', 'approved_at', 'generated_by', 'approved_by']
     date_hierarchy = 'period'

@@ -54,6 +54,42 @@ export const useCreateLoan = () => {
   });
 };
 
+export const useApproveLoan = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (id: number) => tenantApi.loans.approve(id).then((r) => r.data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tenant', 'loans'] });
+      queryClient.invalidateQueries({ queryKey: ['tenant', 'loans', 'summary'] });
+    },
+  });
+};
+
+export const useCloseLoan = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (id: number) => tenantApi.loans.close(id).then((r) => r.data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tenant', 'loans'] });
+      queryClient.invalidateQueries({ queryKey: ['tenant', 'loans', 'summary'] });
+    },
+  });
+};
+
+export const useMarkLoanDefaulted = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (id: number) => tenantApi.loans.markDefaulted(id).then((r) => r.data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tenant', 'loans'] });
+      queryClient.invalidateQueries({ queryKey: ['tenant', 'loans', 'summary'] });
+    },
+  });
+};
+
 export const useUpdateLoan = () => {
   const queryClient = useQueryClient();
 

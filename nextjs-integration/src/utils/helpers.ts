@@ -5,7 +5,11 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-export function formatCurrency(amount: string | number, currency: string = 'USD'): string {
+// Tanzania's shilling is the system default; admins can change it via
+// /api/system-settings/ (see useSystemSettings).
+export const DEFAULT_CURRENCY = 'TZS';
+
+export function formatCurrency(amount: string | number, currency: string = DEFAULT_CURRENCY): string {
   const num = typeof amount === 'string' ? parseFloat(amount) : amount;
   if (isNaN(num)) return '-';
   

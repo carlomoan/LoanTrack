@@ -5,6 +5,7 @@ import type {
   MFIForm, ExchangeRateForm,
   Domain, // <--- ADD THIS
   DonorContribution, MFIDisbursement, MFIDisbursementRepayment,
+  NotificationSummary,
 } from '@/types';
 
 // Shared/Public Schema API
@@ -35,6 +36,8 @@ export const sharedApi = {
       api.patch<AoM>(`/aoms/${id}/`, data),
     delete: (id: number) =>
       api.delete(`/aoms/${id}/`),
+    assignMfi: (id: number, mfiId: number) =>
+      api.post<{ detail: string }>(`/aoms/${id}/assign_mfi/`, { mfi: mfiId }),
   },
 
   // MFIs
@@ -83,6 +86,8 @@ export const sharedApi = {
       api.delete(`/users/${id}/`),
     me: () =>
       api.get<GlobalUser>('/users/me/'),
+    roles: () =>
+      api.get<{ value: string; label: string }[]>('/users/roles/'),
   },
 
   // Exchange Rates
@@ -97,6 +102,14 @@ export const sharedApi = {
       api.patch<ExchangeRate>(`/exchange-rates/${id}/`, data),
     delete: (id: number) =>
       api.delete(`/exchange-rates/${id}/`),
+  },
+
+  // System settings (default currency etc.) -- read by all, write SUPER_ADMIN
+  systemSettings: {
+    get: () =>
+      api.get<{ default_currency: string }>('/system-settings/'),
+    update: (data: { default_currency?: string }) =>
+      api.put<{ default_currency: string }>('/system-settings/', data),
   },
 
   // MFI Reports
@@ -175,4 +188,23 @@ export const sharedApi = {
         { amount }
       ),
   },
+
+  // Notifications -- live counts of things the caller needs to act on
+  notifications: {
+    summary: () =>
+      api.get<NotificationSummary>('/notifications/summary/'),
+  },
+};
+
+// Password reset -- unauthenticated endpoints, deliberately separate
+// from sharedApi since nothing here needs a logged-in user.
+export const passwordResetApi = {
+  request: (email: string) =>
+    api.post<{ detail: string }>('/password-reset/', { email }),
+  confirm: (uid: string, token: string, new_password: string) =>
+    api.post<{ detail: string }>('/password-reset-confirm/', {
+      uid,
+      token,
+      new_password,
+    }),
 };

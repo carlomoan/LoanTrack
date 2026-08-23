@@ -59,14 +59,18 @@ export interface AoM {
   id: number;
   name: string;
   code: string;
-  donor: number | null;
-  donor_name?: string;
+  /** Donors funding this AoM (many-to-many -- one AoM, many donors). */
+  donors?: number[];
+  donor_ids?: number[];
+  donor_names?: string[];
   contact_email: string;
   contact_phone: string;
   address: string;
   created_at: string;
   updated_at: string;
   mfi_count?: number;
+  /** Ids of the MFIs under this AoM -- used to cascade the disbursement form's MFI dropdown. */
+  mfi_ids?: number[];
 }
 
 export interface GlobalUser {
@@ -313,6 +317,7 @@ export interface DonorReport {
 export interface MFIReportPayload {
   portfolio: PortfolioSummary;
   status_breakdown: StatusBreakdown[];
+  interest_repayment_breakdown: InterestRepaymentBreakdown;
   product_breakdown: ProductBreakdown[];
   gender_distribution: GenderDistribution[];
   borrower_type_distribution: BorrowerTypeDistribution[];
@@ -320,6 +325,15 @@ export interface MFIReportPayload {
   geographic_breakdown: GeographicBreakdown[];
   par_30: PAR30;
   generated_at: string;
+}
+
+export interface InterestRepaymentBreakdown {
+  closed_loans_total: number;
+  repaid_with_interest_count: number;
+  repaid_interest_waived_count: number;
+  principal_collected: number;
+  interest_collected: number;
+  interest_expected_portfolio_wide: number;
 }
 
 export interface AoMReportPayload {
@@ -453,6 +467,7 @@ export interface OfficerPerformance {
 export interface TenantPortfolioSummaryResponse {
   portfolio: PortfolioSummary;
   status_breakdown: StatusBreakdown[];
+  interest_repayment_breakdown: InterestRepaymentBreakdown;
   product_breakdown: ProductBreakdown[];
   branch_performance?: BranchPerformance[];
   officer_performance?: OfficerPerformance[];
@@ -536,13 +551,13 @@ export interface District {
   ward_count?: number;
 }
 
-export type GeoType =
-  | 'URB'
-  | 'RUR'
-  | 'PER'
-  | 'URBAN'
-  | 'RURAL'
-  | 'PERI_URBAN';
+export type GeoType = 'URB' | 'RUR' | 'PER';
+
+export const GEO_TYPE_LABELS: Record<GeoType, string> = {
+  URB: 'Urban',
+  RUR: 'Rural',
+  PER: 'Peri-Urban',
+};
 
 export interface Ward {
   id: number;
@@ -569,6 +584,15 @@ export interface Street {
   updated_at: string;
   member_count?: number;
   branch_count?: number;
+}
+
+export interface GeocodeReverseResult {
+  coordinates: { lat: number; lng: number };
+  display_name: string | null;
+  region: { id: number; name: string } | null;
+  district: { id: number; name: string } | null;
+  ward: { id: number; name: string } | null;
+  street: { id: number; name: string } | null;
 }
 
 export interface Branch {
@@ -736,7 +760,7 @@ export interface Loan {
 }
 
 export interface LoanForm {
-  loan_number: string;
+  loan_number?: string;
   member: number;
 
   branch?: number | null;
@@ -896,19 +920,6 @@ export interface OfficerPerformance {
   member_count: number;
 }
 
-export interface TenantPortfolioSummaryResponse {
-  portfolio: PortfolioSummary;
-  status_breakdown: StatusBreakdown[];
-  product_breakdown: ProductBreakdown[];
-  branch_performance?: BranchPerformance[];
-  officer_performance?: OfficerPerformance[];
-  geographic_breakdown: GeographicBreakdown[];
-  wss_loans: WSSLoans;
-  gender_distribution: GenderDistribution[];
-  borrower_type_distribution: BorrowerTypeDistribution[];
-  par_30: PAR30;
-}
-
 export interface MonthlyDisbursementPoint {
   month: string;
   count: number;
@@ -923,4 +934,50 @@ export interface MonthlyRepaymentPoint {
 export interface MonthlyTrends {
   monthly_disbursements: MonthlyDisbursementPoint[];
   monthly_repayments: MonthlyRepaymentPoint[];
+}
+
+// =============================================================================
+// Notifications
+// =============================================================================
+
+export type NotificationType =
+  | 'mfi_report_pending'
+  | 'aom_report_pending'
+  | 'donor_report_pending'
+  | 'disbursement_overdue';
+
+export interface NotificationItem {
+  type: NotificationType;
+  count: number;
+  label: string;
+  href: string;
+}
+
+export interface NotificationSummary {
+  items: NotificationItem[];
+  total: number;
+}
+
+// =============================================================================
+// Activity / Audit Trail
+// =============================================================================
+
+export type ActivityChangeType = 'created' | 'changed' | 'deleted';
+
+export interface ActivityEntry {
+  history_id: number;
+  model: 'Loan' | 'Member' | 'LoanAdjustment' | 'Branch';
+  object_id: number;
+  object_repr: string;
+  change_type: ActivityChangeType;
+  changed_by: string | null;
+  changed_at: string;
+  changed_fields: string[];
+}
+
+export interface ActivityFeedResponse {
+  count: number;
+  page: number;
+  page_size: number;
+  results: ActivityEntry[];
 }

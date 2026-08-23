@@ -43,7 +43,7 @@ export default function ConsolidatedReportsPage() {
             key={t}
             onClick={() => setTab(t)}
             className={`px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors capitalize ${
-              tab === t ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700'
+              tab === t ? 'border-violet-600 text-violet-600' : 'border-transparent text-slate-500 hover:text-slate-700'
             }`}
           >
             {t} Reports
@@ -199,7 +199,7 @@ function DonorReportsTab({ canApprove }: { canApprove: boolean }) {
 function LoadingState() {
   return (
     <div className="text-center py-8">
-      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto"></div>
+      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-violet-600 mx-auto"></div>
     </div>
   );
 }

@@ -3,13 +3,23 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useLoans } from '@/hooks/useLoans';
+import { toast } from 'sonner';
+import { Check, CalendarPlus, Trash2, RotateCcw, XCircle, AlertOctagon } from 'lucide-react';
+import { useLoans, useApproveLoan, useSoftDeleteLoan, useRestoreLoan, useGenerateLoanSchedule, useCloseLoan, useMarkLoanDefaulted } from '@/hooks/useLoans';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
 import { useAuthStore } from '@/hooks/useAuthStore';
-import { canWriteTenantData } from '@/lib/permissions';
+import { showApiError } from '@/lib/api-errors';
+import { formatCurrency } from '@/utils/helpers';
+import { useDefaultCurrency } from '@/hooks/useSystemSettings';
+import {
+  canWriteTenantData,
+  canApproveLoans,
+  canSoftDeleteRecords,
+  canGenerateSchedule,
+} from '@/lib/permissions';
 
 export default function LoansPage() {
   const [searchTerm, setSearchTerm] = useState('');
@@ -17,6 +27,12 @@ export default function LoansPage() {
   const [page, setPage] = useState(1);
   const router = useRouter();
   const user = useAuthStore((state) => state.user);
+  const currency = useDefaultCurrency();
+
+  const canWrite = canWriteTenantData(user);
+  const canApprove = canApproveLoans(user);
+  const canSoftDelete = canSoftDeleteRecords(user);
+  const canSchedule = canGenerateSchedule(user);
 
   const { data: loans, isLoading } = useLoans({
     page: page,
@@ -25,6 +41,70 @@ export default function LoansPage() {
     status: statusFilter || undefined,
   });
 
+  const approveLoan = useApproveLoan();
+  const softDeleteLoan = useSoftDeleteLoan();
+  const restoreLoan = useRestoreLoan();
+  const generateSchedule = useGenerateLoanSchedule();
+  const closeLoan = useCloseLoan();
+  const markDefaulted = useMarkLoanDefaulted();
+
+  const handleClose = async (id: number) => {
+    if (!confirm('Close this fully-repaid loan?')) return;
+    try {
+      await closeLoan.mutateAsync(id);
+      toast.success('Loan closed');
+    } catch (e) {
+      showApiError(e, 'Failed to close loan');
+    }
+  };
+
+  const handleMarkDefaulted = async (id: number) => {
+    if (!confirm('Flag this loan as DEFAULTED? This is recorded in the audit trail.')) return;
+    try {
+      await markDefaulted.mutateAsync(id);
+      toast.success('Loan marked as defaulted');
+    } catch (e) {
+      showApiError(e, 'Failed to flag default');
+    }
+  };
+
+  const handleApprove = async (id: number) => {
+    try {
+      await approveLoan.mutateAsync(id);
+      toast.success('Loan approved and activated');
+    } catch (e) {
+      showApiError(e, 'Failed to approve loan');
+    }
+  };
+
+  const handleGenerateSchedule = async (id: number) => {
+    try {
+      await generateSchedule.mutateAsync(id);
+      toast.success('Repayment schedule generated');
+    } catch (e) {
+      showApiError(e, 'Failed to generate schedule');
+    }
+  };
+
+  const handleSoftDelete = async (id: number) => {
+    if (!confirm('Soft-delete this loan? It can be restored later.')) return;
+    try {
+      await softDeleteLoan.mutateAsync(id);
+      toast.success('Loan deleted');
+    } catch (e) {
+      showApiError(e, 'Failed to delete loan');
+    }
+  };
+
+  const handleRestore = async (id: number) => {
+    try {
+      await restoreLoan.mutateAsync(id);
+      toast.success('Loan restored');
+    } catch (e) {
+      showApiError(e, 'Failed to restore loan');
+    }
+  };
+
   return (
     <div className="max-w-6xl mx-auto p-6">
       <div className="mb-6 flex justify-between items-center">
@@ -32,7 +112,7 @@ export default function LoansPage() {
           <h1 className="text-2xl font-bold text-gray-900">Loans Management</h1>
           <p className="text-gray-600">Manage all loans and disbursements</p>
         </div>
-        {canWriteTenantData(user) && (
+        {canWrite && (
           <Button onClick={() => router.push('/dashboard/loans/new')}>
             Create Loan
           </Button>
@@ -95,7 +175,7 @@ export default function LoansPage() {
         <CardContent>
           {isLoading ? (
             <div className="text-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto"></div>
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-violet-600 mx-auto"></div>
               <p className="mt-2 text-sm text-gray-500">Loading loans...</p>
             </div>
           ) : (loans?.results?.length ?? 0) === 0 ? (
@@ -106,16 +186,15 @@ export default function LoansPage() {
           ) : (
             <div className="space-y-4">
               {loans?.results?.map((loan) => (
-                <div key={loan.id} className="flex items-center justify-between p-4 border rounded-lg hover:bg-gray-50">
-                  <div className="flex-1">
+                <div key={loan.id} className="flex items-center justify-between p-4 border rounded-lg hover:bg-gray-50 gap-3 flex-wrap">
+                  <div className="flex-1 min-w-[140px]">
                     <p className="font-medium text-gray-900">{loan.loan_number}</p>
-                    {/* ✅ Use flat member_name, not loan.member?.name */}
                     <p className="text-sm text-gray-500">{loan.member_name || 'N/A'}</p>
                   </div>
                   <div className="text-center">
                     <p className="text-sm text-gray-500">Amount</p>
                     <p className="font-medium text-gray-900">
-                      ${parseFloat(loan.loan_amount || '0').toLocaleString()}
+                      {formatCurrency(loan.loan_amount || 0, currency)}
                     </p>
                   </div>
                   <div className="text-center">
@@ -130,7 +209,6 @@ export default function LoansPage() {
                   </div>
                   <div className="text-center">
                     <p className="text-sm text-gray-500">Officer</p>
-                    {/* ✅ Use flat loan_officer_name, not loan.loan_officer?.name */}
                     <p className="font-medium text-gray-900">
                       {loan.loan_officer_name || 'N/A'}
                     </p>
@@ -141,10 +219,78 @@ export default function LoansPage() {
                       {new Date(loan.disbursement_date).toLocaleDateString()}
                     </p>
                   </div>
+
+                  {/* Role-gated workflow actions */}
+                  <div className="flex items-center gap-2">
+                    {canApprove && loan.status === 'PND' && (
+                      <Button
+                        size="sm"
+                        onClick={() => handleApprove(loan.id)}
+                        disabled={approveLoan.isPending}
+                        title="Approve loan"
+                      >
+                        <Check className="h-4 w-4 mr-1" /> Approve
+                      </Button>
+                    )}
+                    {canSchedule && loan.status === 'ACT' && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleGenerateSchedule(loan.id)}
+                        disabled={generateSchedule.isPending}
+                        title="Generate repayment schedule"
+                      >
+                        <CalendarPlus className="h-4 w-4 mr-1" /> Schedule
+                      </Button>
+                    )}
+                    {canApprove && loan.status === 'ACT' && (
+                      <>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => handleClose(loan.id)}
+                          disabled={closeLoan.isPending}
+                          title="Close fully-repaid loan"
+                        >
+                          <XCircle className="h-4 w-4 mr-1" /> Close
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => handleMarkDefaulted(loan.id)}
+                          disabled={markDefaulted.isPending}
+                          title="Flag as defaulted"
+                        >
+                          <AlertOctagon className="h-4 w-4 text-red-600" />
+                        </Button>
+                      </>
+                    )}
+                    {canSoftDelete && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleSoftDelete(loan.id)}
+                        disabled={softDeleteLoan.isPending}
+                        title="Soft-delete loan"
+                      >
+                        <Trash2 className="h-4 w-4 text-red-600" />
+                      </Button>
+                    )}
+                    {canSoftDelete && loan.is_deleted && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleRestore(loan.id)}
+                        disabled={restoreLoan.isPending}
+                        title="Restore loan"
+                      >
+                        <RotateCcw className="h-4 w-4" />
+                      </Button>
+                    )}
+                  </div>
                 </div>
               ))}
 
-              {/* ✅ Fixed: nullish coalescing for pagination */}
               {(loans?.results?.length ?? 0) > 0 && (
                 <div className="flex justify-between items-center mt-6">
                   <Button

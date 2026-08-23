@@ -7,6 +7,8 @@ import { api } from '@/api/client'; // ✅ Named import
 import { motion, AnimatePresence } from 'framer-motion';
 import { DollarSign, AlertTriangle, CheckCircle, Clock, Calendar } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
+import { formatCurrency } from '@/utils/helpers';
+import { useDefaultCurrency } from '@/hooks/useSystemSettings';
 import type { Loan, RepaymentSchedule, LoanAdjustment } from '@/types';
 
 // Helper to display adjustment type labels
@@ -21,6 +23,7 @@ const adjustmentTypeLabels: Record<string, string> = {
 
 export default function LoanDetailPage({ params }: { params: { id: string } }) {
   const [activeTab, setActiveTab] = useState('overview');
+  const currency = useDefaultCurrency();
 
   const { data: loan, isLoading } = useQuery({
     queryKey: ['loan', params.id],
@@ -66,9 +69,9 @@ export default function LoanDetailPage({ params }: { params: { id: string } }) {
 
       {/* Quick Stats */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <StatBox icon={DollarSign} label="Loan Amount" value={`$${parseFloat(loan.loan_amount || '0').toLocaleString()}`} color="text-blue-600 bg-blue-50" />
-        <StatBox icon={AlertTriangle} label="Outstanding" value={`$${parseFloat(loan.outstanding_amount || '0').toLocaleString()}`} color="text-red-600 bg-red-50" />
-        <StatBox icon={CheckCircle} label="Repaid" value={`$${parseFloat(loan.repaid_amount || '0').toLocaleString()}`} color="text-emerald-600 bg-emerald-50" />
+        <StatBox icon={DollarSign} label="Loan Amount" value={formatCurrency(loan.loan_amount || 0, currency)} color="text-blue-600 bg-blue-50" />
+        <StatBox icon={AlertTriangle} label="Outstanding" value={formatCurrency(loan.outstanding_amount || 0, currency)} color="text-red-600 bg-red-50" />
+        <StatBox icon={CheckCircle} label="Repaid" value={formatCurrency(loan.repaid_amount || 0, currency)} color="text-emerald-600 bg-emerald-50" />
         <StatBox
           icon={Calendar}
           label="Next Due"
@@ -143,8 +146,8 @@ export default function LoanDetailPage({ params }: { params: { id: string } }) {
                       <tr key={s.id} className={s.days_overdue > 0 && !s.is_paid ? 'bg-red-50/30' : ''}>
                         <td className="px-6 py-4">{s.installment_number}</td>
                         <td className="px-6 py-4">{s.due_date}</td>
-                        <td className="px-6 py-4">${parseFloat(s.expected_total || '0').toLocaleString()}</td>
-                        <td className="px-6 py-4 text-emerald-600">${parseFloat(s.actual_paid || '0').toLocaleString()}</td>
+                        <td className="px-6 py-4">{formatCurrency(s.expected_total || 0, currency)}</td>
+                        <td className="px-6 py-4 text-emerald-600">{formatCurrency(s.actual_paid || 0, currency)}</td>
                         <td className="px-6 py-4">
                           {s.is_paid ? (
                             <span className="text-emerald-600 flex items-center gap-1"><CheckCircle className="w-4 h-4" /> Paid</span>
@@ -173,7 +176,7 @@ export default function LoanDetailPage({ params }: { params: { id: string } }) {
                   <div key={adj.id} className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm flex justify-between items-center">
                     <div>
                       <p className="font-medium text-gray-900">
-                        ${parseFloat(adj.amount || '0').toLocaleString()} — {adjustmentTypeLabels[adj.adjustment_type] || adj.adjustment_type}
+                        {formatCurrency(adj.amount || 0, currency)} — {adjustmentTypeLabels[adj.adjustment_type] || adj.adjustment_type}
                       </p>
                       {/* ✅ Fixed: Use adj.reason, not adj.description */}
                       <p className="text-sm text-gray-500">{adj.reason}</p>

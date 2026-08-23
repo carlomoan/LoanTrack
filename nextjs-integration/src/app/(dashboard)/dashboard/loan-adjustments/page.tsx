@@ -1,14 +1,21 @@
 'use client';
 
 import { useState } from 'react';
-import { useLoanAdjustments, useApproveLoanAdjustment } from '@/hooks/useLoanAdjustments';
+import { useLoanAdjustments, useApproveLoanAdjustment, useRejectLoanAdjustment } from '@/hooks/useLoanAdjustments';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
 import { toast } from 'sonner';
+import { useAuthStore } from '@/hooks/useAuthStore';
+import { canApproveLoanAdjustments } from '@/lib/permissions';
+import { formatCurrency } from '@/utils/helpers';
+import { useDefaultCurrency } from '@/hooks/useSystemSettings';
 
 export default function LoanAdjustmentsPage() {
+  const user = useAuthStore((state) => state.user);
+  const canApprove = canApproveLoanAdjustments(user);
+  const currency = useDefaultCurrency();
   const [searchTerm, setSearchTerm] = useState('');
   const [typeFilter, setTypeFilter] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string>('');
@@ -23,6 +30,17 @@ export default function LoanAdjustmentsPage() {
   });
 
   const approveLoanAdjustment = useApproveLoanAdjustment();
+  const rejectLoanAdjustment = useRejectLoanAdjustment();
+
+  const handleReject = async (adjustmentId: number) => {
+    const reason = prompt('Reason for rejection (recorded in the audit trail):') || '';
+    try {
+      await rejectLoanAdjustment.mutateAsync({ id: adjustmentId, reason });
+      toast.success('Loan adjustment rejected');
+    } catch (error) {
+      toast.error('Failed to reject adjustment');
+    }
+  };
 
   const handleApprove = async (adjustmentId: number) => {
     try {
@@ -128,7 +146,7 @@ export default function LoanAdjustmentsPage() {
         <CardContent>
           {isLoading ? (
             <div className="text-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto"></div>
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-violet-600 mx-auto"></div>
               <p className="mt-2 text-sm text-gray-500">Loading adjustments...</p>
             </div>
           ) : adjustments?.results?.length === 0 ? (
@@ -149,7 +167,7 @@ export default function LoanAdjustmentsPage() {
                   <div className="text-center">
                     <p className="text-sm text-gray-500">Amount</p>
                     <p className="font-medium text-gray-900">
-                      ${parseFloat(adjustment.amount || '0').toLocaleString()}
+                      {formatCurrency(adjustment.amount || 0, currency)}
                     </p>
                   </div>
                   <div className="text-center">
@@ -185,15 +203,25 @@ export default function LoanAdjustmentsPage() {
                       <span className="text-sm text-green-600 font-medium">
                         Approved {adjustment.approved_at ? new Date(adjustment.approved_at).toLocaleDateString() : ''}
                       </span>
-                    ) : (
-                      <Button
-                        size="sm"
-                        onClick={() => handleApprove(adjustment.id)}
-                        disabled={approveLoanAdjustment.isPending}
-                      >
-                        Approve
-                      </Button>
-                    )}
+                    ) : canApprove ? (
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          onClick={() => handleApprove(adjustment.id)}
+                          disabled={approveLoanAdjustment.isPending}
+                        >
+                          Approve
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => handleReject(adjustment.id)}
+                          disabled={rejectLoanAdjustment.isPending}
+                        >
+                          Reject
+                        </Button>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ))}

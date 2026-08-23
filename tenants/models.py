@@ -482,7 +482,7 @@ class Loan(models.Model):
         DEFAULTED = "DEF", "Defaulted"
         PENDING = "PND", "Pending"
 
-    loan_number = models.CharField(max_length=50, unique=True)
+    loan_number = models.CharField(max_length=50, unique=True, blank=True)
 
     member = models.ForeignKey(
         Member,
@@ -567,7 +567,60 @@ class Loan(models.Model):
     def __str__(self):
         return f"{self.loan_number} - {self.member.name}"
 
+    def _generate_loan_number(self) -> str:
+        """
+        Format: {first 3 letters of MFI name, uppercase}{YY}{MM}{DD}-{3-digit counter}
+        e.g. "Public" on 2026-08-17 -> "PUB260817-001"
+
+        The counter resets daily (it counts existing loans whose number
+        already starts with today's prefix), since the date is already
+        encoded in the prefix -- a loan numbered -001 tomorrow doesn't
+        collide with today's -001.
+        """
+        from django.db import connection
+
+        # connection.tenant is only the *full* MFI row when set via real
+        # HTTP middleware (connection.set_tenant(mfi_instance)). Code
+        # that instead uses schema_context() -- shell scripts, CSV
+        # import, cross-tenant report generation, tests -- gets a
+        # lightweight FakeTenant that only carries schema_name, not
+        # name/aom/etc. Looking the MFI up by schema_name works
+        # correctly either way.
+        from core.models import MFI as MFIModel
+
+        mfi = MFIModel.objects.filter(
+            schema_name=connection.schema_name
+        ).only("name").first()
+        mfi_name = mfi.name if mfi else ""
+
+        name_letters = "".join(c for c in mfi_name if c.isalnum())
+        prefix_letters = (name_letters[:3] or "MFI").upper().ljust(3, "X")
+
+        today = timezone.now().date()
+        date_part = today.strftime("%y%m%d")
+        prefix = f"{prefix_letters}{date_part}"
+
+        existing_count = Loan.all_objects.filter(
+            loan_number__startswith=f"{prefix}-"
+        ).count()
+
+        counter = existing_count + 1
+        candidate = f"{prefix}-{counter:03d}"
+
+        # Defends against a rare race (two loans saved concurrently on
+        # the same day landing on the same count) rather than relying on
+        # the count alone -- same pattern used for Region/District codes
+        # elsewhere in this app.
+        while Loan.all_objects.filter(loan_number=candidate).exists():
+            counter += 1
+            candidate = f"{prefix}-{counter:03d}"
+
+        return candidate
+
     def save(self, *args, **kwargs):
+        if not self.loan_number:
+            self.loan_number = self._generate_loan_number()
+
         loan_amount = Decimal(str(self.loan_amount or "0"))
         repaid_amount = Decimal(str(self.repaid_amount or "0"))
 

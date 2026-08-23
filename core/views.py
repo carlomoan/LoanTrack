@@ -1,12 +1,22 @@
+import logging
 from decimal import Decimal
 
+from django.conf import settings
+from django.contrib.auth.tokens import PasswordResetTokenGenerator
+from django.core.mail import send_mail
 from django.db.models import Count
 from django.utils import timezone
+from django.utils.encoding import force_bytes, force_str
+from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django_tenants.utils import schema_context
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.views import APIView
+
+logger = logging.getLogger(__name__)
 
 from .permissions import (
     AOM_STAFF,
@@ -19,6 +29,8 @@ from .permissions import (
     DonorReportPermission,
     ExchangeRatePermission,
     GlobalUserPermission,
+    MFI_ADMIN,
+    MFI_WRITE_ROLES,
     MFIDisbursementPermission,
     MFIDisbursementRepaymentPermission,
     MFIPermission,
@@ -54,6 +66,7 @@ from .models import (
     MFIDisbursement,
     MFIDisbursementRepayment,
     MFIReport,
+    SystemSetting,
 )
 from .serializers import (
     AoMReportSerializer,
@@ -101,18 +114,61 @@ class AoMViewSet(viewsets.ModelViewSet):
     serializer_class = AoMSerializer
     permission_classes = [permissions.IsAuthenticated, AoMPermission]
 
-    filterset_fields = ["donor"]
+    filterset_fields = ["donors"]
     search_fields = ["name", "code", "contact_email"]
     ordering_fields = ["name", "code", "created_at"]
     ordering = ["name"]
 
     def get_queryset(self):
         queryset = (
-            AoM.objects.select_related("donor")
+            AoM.objects.prefetch_related("donors", "mfis")
             .annotate(mfi_count=Count("mfis"))
             .order_by("name")
         )
         return AoMPermission.scope_queryset(self.request, queryset)
+
+    @action(detail=True, methods=["post"], url_path="assign_mfi")
+    def assign_mfi(self, request, pk=None):
+        """
+        Assign an MFI to this AoM. SUPER_ADMIN only -- org structure is a
+        system-level decision, not something AoM staff self-serve.
+        Accepts {"mfi": <id>}.
+        """
+        if get_role(request) != SUPER_ADMIN:
+            raise PermissionDenied(
+                "Only a super admin can assign MFIs to an AoM."
+            )
+
+        mfi_id = request.data.get("mfi")
+        if not mfi_id:
+            return Response(
+                {"mfi": ["This field is required."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            mfi = MFI.objects.get(pk=mfi_id)
+        except MFI.DoesNotExist:
+            return Response(
+                {"mfi": ["MFI not found."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        previous_aom = mfi.aom
+        mfi.aom = self.get_object()
+        mfi.save(update_fields=["aom", "updated_at"])
+
+        return Response(
+            {
+                "detail": f"{mfi.name} assigned to {mfi.aom.name}.",
+                "previous_aom": (
+                    {"id": previous_aom.id, "name": previous_aom.name}
+                    if previous_aom and previous_aom.id != mfi.aom.id
+                    else None
+                ),
+                "mfi": {"id": mfi.id, "name": mfi.name, "aom": mfi.aom.id},
+            }
+        )
 
 
 class GlobalUserViewSet(viewsets.ModelViewSet):
@@ -187,17 +243,44 @@ class MFIViewSet(viewsets.ModelViewSet):
             return MFIListSerializer
         return MFIDetailSerializer
 
+    def perform_create(self, serializer):
+        # serializer.save() -> MFI.objects.create() -> MFI.save() runs
+        # synchronously, including create_schema() -- so by the time
+        # this next line runs, the tenant's schema is guaranteed to
+        # exist. This is the one thing the post_save signal in
+        # signals.py can't guarantee (it fires partway through
+        # MFI.save(), before create_schema() has run), which is why the
+        # Domain record and default region/branch/etc. are created here
+        # explicitly rather than relying on the signal alone.
+        mfi = serializer.save()
+        try:
+            initialize_tenant_defaults(mfi)
+        except Exception:
+            logger.exception(
+                "Failed to initialize default tenant data for MFI id=%s (%s). "
+                "The MFI and its schema were created successfully; retry via "
+                "POST /api/mfis/%s/initialize_tenant/.",
+                mfi.id,
+                mfi.schema_name,
+                mfi.id,
+            )
+
     @action(detail=True, methods=["post"], url_path="create_schema")
     def create_schema(self, request, pk=None):
         """
-        Manually trigger tenant schema creation.
-        Used by Next.js: POST /api/mfis/{id}/create_schema/
+        Manually (re)create this MFI's tenant schema and run its
+        migrations -- for repairing an MFI whose schema was never
+        created or never fully migrated (e.g. created before the
+        onboarding fix that made this automatic, or interrupted
+        partway through). Safe to call on an MFI that already has a
+        working schema: check_if_exists=True makes schema creation a
+        no-op in that case, and migrate_schemas is itself idempotent.
         """
 
         mfi = self.get_object()
 
         try:
-            mfi.save()
+            mfi.create_schema(check_if_exists=True, verbosity=1)
             initialize_tenant_defaults(mfi)
 
             return Response(
@@ -301,6 +384,74 @@ class ExchangeRateViewSet(viewsets.ModelViewSet):
     search_fields = ["from_currency", "to_currency", "source"]
     ordering_fields = ["date", "created_at"]
     ordering = ["-date"]
+
+
+DEFAULT_CURRENCY_KEY = "default_currency"
+DEFAULT_CURRENCY_FALLBACK = "TZS"
+
+
+class SystemSettingsView(APIView):
+    """
+    GET  /api/system-settings/   -> { default_currency: "TZS", ... }
+    PUT  /api/system-settings/   -> update values (SUPER_ADMIN only)
+
+    The default currency is what the whole UI formats money in. Tanzania's
+    shilling is the shipped default; changing it is a system-admin decision,
+    not a per-user preference, so writes are restricted accordingly.
+    """
+
+    EDITABLE_KEYS = {
+        # key: (required pattern, error message)
+        DEFAULT_CURRENCY_KEY: (
+            r"^[A-Za-z]{3}$",
+            "default_currency must be a 3-letter ISO code (e.g. TZS).",
+        ),
+    }
+
+    def get(self, request):
+        return Response(
+            {
+                "default_currency": SystemSetting.get(
+                    DEFAULT_CURRENCY_KEY, DEFAULT_CURRENCY_FALLBACK
+                ),
+            }
+        )
+
+    def put(self, request):
+        if get_role(request) != SUPER_ADMIN:
+            raise PermissionDenied(
+                "Only a super admin can change system settings."
+            )
+
+        import re
+
+        updates = {}
+        for key, (pattern, error) in self.EDITABLE_KEYS.items():
+            if key not in request.data:
+                continue
+            value = str(request.data[key]).strip().upper()
+            if not re.match(pattern, value):
+                return Response(
+                    {key: [error]}, status=status.HTTP_400_BAD_REQUEST
+                )
+            updates[key] = value
+
+        if not updates:
+            return Response(
+                {"detail": "No recognized settings to update."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        for key, value in updates.items():
+            SystemSetting.set(key, value)
+
+        return Response(
+            {
+                "default_currency": SystemSetting.get(
+                    DEFAULT_CURRENCY_KEY, DEFAULT_CURRENCY_FALLBACK
+                )
+            }
+        )
 
 
 class MFIReportViewSet(viewsets.ModelViewSet):
@@ -606,16 +757,394 @@ class MFIDisbursementRepaymentViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        installment.actual_paid = (installment.actual_paid or Decimal("0")) + amount
-        installment.save()
+        # Partial payments are allowed: an MFI can pay less than the full
+        # installment and the remainder stays due. Overpayment beyond this
+        # installment's remaining balance is rejected -- it belongs on a
+        # later installment, not silently absorbed here.
+        remaining = installment.remaining_amount
+        if amount > remaining:
+            return Response(
+                {
+                    "detail": (
+                        f"Amount exceeds this installment's remaining "
+                        f"balance of {remaining}."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        disbursement = installment.disbursement
-        disbursement.repaid_amount = (
-            disbursement.repaid_amount or Decimal("0")
-        ) + amount
-        if disbursement.outstanding_amount - amount <= 0:
-            disbursement.status = MFIDisbursement.DisbursementStatus.REPAID
-        disbursement.save()
+        with transaction.atomic():
+            installment = MFIDisbursementRepayment.objects.select_for_update().get(pk=installment.pk)
+            installment.actual_paid = (installment.actual_paid or Decimal("0")) + amount
+            installment.save()
+
+            disbursement = MFIDisbursement.objects.select_for_update().get(pk=installment.disbursement_id)
+            disbursement.repaid_amount = (
+                disbursement.repaid_amount or Decimal("0")
+            ) + amount
+            # save() recomputes outstanding_amount = principal - repaid.
+            if disbursement.repaid_amount >= disbursement.principal_amount:
+                disbursement.status = MFIDisbursement.DisbursementStatus.REPAID
+            elif disbursement.status == MFIDisbursement.DisbursementStatus.PENDING:
+                disbursement.status = MFIDisbursement.DisbursementStatus.ACTIVE
+            disbursement.save()
 
         serializer = self.get_serializer(installment)
         return Response(serializer.data)
+
+
+# =============================================================================
+# Notifications
+# =============================================================================
+
+
+class NotificationsViewSet(viewsets.ViewSet):
+    """
+    Real, queryable counts of things this specific user has to act on --
+    not a stored notification log, just a live summary computed from data
+    that already exists and is already scoped to their organization via
+    the same permission classes used everywhere else. Reuses each
+    resource's own scope_queryset so this can never show a count wider
+    than what the user could actually open and act on.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    @action(detail=False, methods=["get"])
+    def summary(self, request):
+        role = get_role(request)
+        items = []
+
+        # Reports awaiting approval -- only surfaced to the role that can
+        # actually approve them (mirrors the separation-of-duty rules on
+        # the approve/reject actions themselves).
+        if role in (SUPER_ADMIN, AOM_STAFF):
+            count = MFIReportPermission().scope_queryset(
+                request, MFIReport.objects.filter(status="SUBMITTED")
+            ).count()
+            if count:
+                items.append(
+                    {
+                        "type": "mfi_report_pending",
+                        "count": count,
+                        "label": f"{count} MFI report{'s' if count != 1 else ''} awaiting approval",
+                        "href": "/dashboard/organizations/reports",
+                    }
+                )
+
+        if role in (SUPER_ADMIN, DONOR_STAFF):
+            count = AoMReportPermission().scope_queryset(
+                request, AoMReport.objects.filter(status="SUBMITTED")
+            ).count()
+            if count:
+                items.append(
+                    {
+                        "type": "aom_report_pending",
+                        "count": count,
+                        "label": f"{count} AoM report{'s' if count != 1 else ''} awaiting approval",
+                        "href": "/dashboard/organizations/reports",
+                    }
+                )
+
+        if role == SUPER_ADMIN:
+            count = DonorReportPermission().scope_queryset(
+                request, DonorReport.objects.filter(status="SUBMITTED")
+            ).count()
+            if count:
+                items.append(
+                    {
+                        "type": "donor_report_pending",
+                        "count": count,
+                        "label": f"{count} donor report{'s' if count != 1 else ''} awaiting approval",
+                        "href": "/dashboard/organizations/reports",
+                    }
+                )
+
+        # Overdue wholesale disbursement installments -- relevant to
+        # whoever issued the loan (AoM) and whoever owes it (MFI), not to
+        # loan officers (that's the individual-lending layer, a
+        # different concern).
+        if role in (SUPER_ADMIN, AOM_STAFF) or role in MFI_WRITE_ROLES:
+            overdue_qs = MFIDisbursementRepaymentPermission.scope_queryset(
+                request,
+                MFIDisbursementRepayment.objects.filter(
+                    is_paid=False, due_date__lt=timezone.now().date()
+                ),
+            )
+            count = overdue_qs.count()
+            if count:
+                items.append(
+                    {
+                        "type": "disbursement_overdue",
+                        "count": count,
+                        "label": f"{count} wholesale repayment installment{'s' if count != 1 else ''} overdue",
+                        "href": "/dashboard/organizations?tab=disbursements",
+                    }
+                )
+
+        return Response(
+            {"items": items, "total": sum(item["count"] for item in items)}
+        )
+
+
+# =============================================================================
+# Activity Log
+# =============================================================================
+
+HISTORY_TYPE_LABELS = {"+": "created", "~": "changed", "-": "deleted"}
+
+
+def _serialize_history_row(model_label, row, label_fn):
+    return {
+        "model": model_label,
+        "object_id": row.id,
+        "label": label_fn(row),
+        "change_type": HISTORY_TYPE_LABELS.get(row.history_type, row.history_type),
+        "changed_by": (
+            row.history_user.get_full_name() or row.history_user.username
+            if row.history_user
+            else None
+        ),
+        "changed_at": row.history_date,
+    }
+
+
+class ActivityLogViewSet(viewsets.ViewSet):
+    """
+    A live feed of who changed what, when -- built directly from the
+    simple_history records every model in this app already keeps, not a
+    separate log that could drift out of sync with what actually
+    happened. Every entry here reflects a real save() call, scoped so a
+    caller only ever sees changes to records they could otherwise see
+    through the normal API (no widening the audience for "it's just a
+    log").
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    @action(detail=False, methods=["get"])
+    def feed(self, request):
+        role = get_role(request)
+        user = request.user
+        entries = []
+
+        def add(qs, model_label, label_fn, limit=50):
+            for row in qs.order_by("-history_date")[:limit]:
+                entries.append(_serialize_history_row(model_label, row, label_fn))
+
+        if role == SUPER_ADMIN:
+            add(Donor.history.all(), "Donor", lambda r: r.name)
+            add(AoM.history.all(), "AoM", lambda r: r.name)
+            add(MFI.history.all(), "MFI", lambda r: r.name)
+            add(GlobalUser.history.all(), "User", lambda r: r.username)
+            add(MFIReport.history.all(), "MFI Report", lambda r: f"Report for MFI #{r.mfi_id}, {r.period}")
+            add(AoMReport.history.all(), "AoM Report", lambda r: f"Report for AoM #{r.aom_id}, {r.period}")
+            add(DonorReport.history.all(), "Donor Report", lambda r: f"Report for Donor #{r.donor_id}, {r.period}")
+            add(DonorContribution.history.all(), "Donor Contribution", lambda r: f"{r.amount} {r.currency}")
+            add(MFIDisbursement.history.all(), "Disbursement", lambda r: f"{r.principal_amount} {r.currency}")
+
+        elif role == AOM_STAFF:
+            own_mfi_ids = list(
+                MFI.objects.filter(aom_id=user.aom_id).values_list("id", flat=True)
+            )
+            add(
+                MFI.history.filter(aom_id=user.aom_id), "MFI", lambda r: r.name
+            )
+            add(
+                GlobalUser.history.filter(mfi_id__in=own_mfi_ids), "User", lambda r: r.username
+            )
+            add(
+                MFIReport.history.filter(mfi_id__in=own_mfi_ids),
+                "MFI Report",
+                lambda r: f"Report for MFI #{r.mfi_id}, {r.period}",
+            )
+            add(
+                DonorContribution.history.filter(aom_id=user.aom_id),
+                "Donor Contribution",
+                lambda r: f"{r.amount} {r.currency}",
+            )
+            add(
+                MFIDisbursement.history.filter(aom_id=user.aom_id),
+                "Disbursement",
+                lambda r: f"{r.principal_amount} {r.currency}",
+            )
+
+        elif role == DONOR_STAFF:
+            own_aom_ids = list(
+                AoM.objects.filter(donor_id=user.donor_id).values_list("id", flat=True)
+            )
+            add(
+                AoM.history.filter(donor_id=user.donor_id), "AoM", lambda r: r.name
+            )
+            add(
+                AoMReport.history.filter(aom_id__in=own_aom_ids),
+                "AoM Report",
+                lambda r: f"Report for AoM #{r.aom_id}, {r.period}",
+            )
+            add(
+                DonorReport.history.filter(donor_id=user.donor_id),
+                "Donor Report",
+                lambda r: f"Report for Donor #{r.donor_id}, {r.period}",
+            )
+            add(
+                DonorContribution.history.filter(donor_id=user.donor_id),
+                "Donor Contribution",
+                lambda r: f"{r.amount} {r.currency}",
+            )
+
+        elif role in MFI_WRITE_ROLES:  # MFI_ADMIN, MFI_MANAGER
+            add(
+                MFIReport.history.filter(mfi_id=user.mfi_id),
+                "MFI Report",
+                lambda r: f"Report for {r.period}",
+            )
+            add(
+                MFIDisbursement.history.filter(mfi_id=user.mfi_id),
+                "Disbursement",
+                lambda r: f"{r.principal_amount} {r.currency}",
+            )
+            if role == "MFI_ADMIN":
+                add(
+                    GlobalUser.history.filter(mfi_id=user.mfi_id),
+                    "User",
+                    lambda r: r.username,
+                )
+
+        # role == LOAN_OFFICER or anything else: no org-level activity log
+        # entries -- this is financial/strategic visibility, matching the
+        # same rule already applied to MFIDisbursement itself.
+
+        entries.sort(key=lambda e: e["changed_at"], reverse=True)
+        return Response({"results": entries[:100]})
+
+
+# =============================================================================
+# Password reset
+# =============================================================================
+# Deliberately plain function-based views rather than DRF's built-in
+# password reset (which assumes Django's session-based admin flow) --
+# this is a small, self-contained JSON API matching how the rest of this
+# app talks to the frontend.
+
+
+def _send_password_reset_email(user, uid, token):
+    reset_url = f"{settings.FRONTEND_URL}/reset-password/{uid}/{token}"
+    send_mail(
+        subject="Reset your LoanTrack password",
+        message=(
+            f"Hi {user.get_full_name() or user.username},\n\n"
+            f"Use the link below to set a new password. This link expires "
+            f"in a few hours and can only be used once.\n\n"
+            f"{reset_url}\n\n"
+            f"If you didn't request this, you can safely ignore this email."
+        ),
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[user.email],
+        fail_silently=False,
+    )
+
+
+class PasswordResetRequestView(APIView):
+    """
+    POST {"email": "..."} -> always 200 with a generic message, whether
+    or not that email is registered. Returning a different response for
+    "not found" is a classic account-enumeration leak -- a real MFI
+    manager's email showing up as "not found" vs "reset sent" tells an
+    attacker who has an account here.
+    """
+
+    permission_classes = [permissions.AllowAny]
+    throttle_scope = "password_reset"
+    throttle_classes = [ScopedRateThrottle]
+
+    def post(self, request):
+        email = (request.data.get("email") or "").strip()
+        generic_response = Response(
+            {
+                "detail": (
+                    "If an account exists for that email, a reset link "
+                    "has been sent."
+                )
+            },
+            status=status.HTTP_200_OK,
+        )
+
+        if not email:
+            return Response(
+                {"detail": "Email is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # email isn't a unique field on GlobalUser (it extends
+        # AbstractUser, which only enforces uniqueness on username), so
+        # in the rare case more than one account shares an email, every
+        # matching active account gets its own reset link rather than
+        # guessing which one the person meant.
+        matching_users = GlobalUser.objects.filter(
+            email__iexact=email, is_active=True
+        )
+
+        token_generator = PasswordResetTokenGenerator()
+        for user in matching_users:
+            uid = urlsafe_base64_encode(force_bytes(user.pk))
+            token = token_generator.make_token(user)
+            try:
+                _send_password_reset_email(user, uid, token)
+            except Exception:
+                logger.exception(
+                    "Failed to send password reset email to user id=%s", user.pk
+                )
+
+        return generic_response
+
+
+class PasswordResetConfirmView(APIView):
+    """
+    POST {"uid": "...", "token": "...", "new_password": "..."} -> sets
+    the new password if the uid/token pair is valid and not expired.
+    """
+
+    permission_classes = [permissions.AllowAny]
+    throttle_scope = "password_reset"
+    throttle_classes = [ScopedRateThrottle]
+
+    def post(self, request):
+        uid = request.data.get("uid")
+        token = request.data.get("token")
+        new_password = request.data.get("new_password") or ""
+
+        if not uid or not token or not new_password:
+            return Response(
+                {"detail": "uid, token, and new_password are all required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if len(new_password) < 8:
+            return Response(
+                {"detail": "Password must be at least 8 characters."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            user_id = force_str(urlsafe_base64_decode(uid))
+            user = GlobalUser.objects.get(pk=user_id, is_active=True)
+        except (TypeError, ValueError, OverflowError, GlobalUser.DoesNotExist):
+            return Response(
+                {"detail": "This reset link is invalid."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        token_generator = PasswordResetTokenGenerator()
+        if not token_generator.check_token(user, token):
+            return Response(
+                {"detail": "This reset link is invalid or has expired."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user.set_password(new_password)
+        user.save(update_fields=["password"])
+
+        return Response(
+            {"detail": "Password has been reset. You can now sign in."},
+            status=status.HTTP_200_OK,
+        )

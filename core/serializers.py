@@ -32,10 +32,27 @@ class AoMSerializer(serializers.ModelSerializer):
 
     mfi_count = serializers.IntegerField(read_only=True, default=0)
 
+    # Ids of the MFIs under this AoM, so the disbursement form can limit
+    # its MFI dropdown to valid choices instead of letting the user pick a
+    # combination the backend will reject.
+    mfi_ids = serializers.SerializerMethodField()
+
+    donor_ids = serializers.SerializerMethodField()
+    donor_names = serializers.SerializerMethodField()
+
     class Meta:
         model = AoM
         fields = "__all__"
         read_only_fields = ["id", "created_at", "updated_at"]
+
+    def get_mfi_ids(self, obj):
+        return list(obj.mfis.values_list("id", flat=True))
+
+    def get_donor_ids(self, obj):
+        return list(obj.donors.values_list("id", flat=True))
+
+    def get_donor_names(self, obj):
+        return list(obj.donors.values_list("name", flat=True))
 
 
 class DomainSerializer(serializers.ModelSerializer):
@@ -177,6 +194,7 @@ class MFIListSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             "id",
+            "code",
             "schema_name",
             "created_at",
             "updated_at",
@@ -260,6 +278,83 @@ class GlobalUserSerializer(serializers.ModelSerializer):
             }
         }
 
+    # Fields that change what an account can do or where it belongs.
+    # Never settable through self-edit, and only settable on someone else
+    # within the limits of ASSIGNABLE_ROLES below.
+    PRIVILEGE_FIELDS = {"role", "is_staff", "is_active", "aom", "donor", "mfi"}
+
+    # Mirrors the frontend's assignableRoles() in lib/permissions.ts --
+    # keep both in sync. This is the actual security boundary; the
+    # frontend list is just UI convenience for hiding options that would
+    # be rejected here anyway.
+    ASSIGNABLE_ROLES = {
+        "SUPER_ADMIN": {
+            "SUPER_ADMIN", "AOM_STAFF", "DONOR_STAFF",
+            "MFI_ADMIN", "MFI_MANAGER", "LOAN_OFFICER",
+        },
+        "AOM_STAFF": {"MFI_ADMIN", "MFI_MANAGER", "LOAN_OFFICER"},
+        "MFI_ADMIN": {"MFI_MANAGER", "LOAN_OFFICER"},
+    }
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        if request is None or not getattr(request.user, "is_authenticated", False):
+            return attrs
+
+        requester = request.user
+        requester_role = getattr(requester, "role", None)
+        touched_privilege_fields = self.PRIVILEGE_FIELDS & set(attrs.keys())
+
+        # Editing your own account: no privilege field may move, no
+        # matter who you are. A SUPER_ADMIN changing their own role is a
+        # rare enough case that it belongs in the Django admin, not a
+        # self-service endpoint that every role can reach.
+        if self.instance is not None and self.instance.id == requester.id:
+            if touched_privilege_fields:
+                raise serializers.ValidationError(
+                    "You cannot change your own role, status, or "
+                    "organization assignment through this endpoint."
+                )
+            return attrs
+
+        # Creating a new account, or editing someone else's: the target
+        # role must be one this requester is actually allowed to grant.
+        target_role = attrs.get("role") or getattr(self.instance, "role", None)
+        allowed_roles = self.ASSIGNABLE_ROLES.get(requester_role, set())
+
+        if target_role and target_role not in allowed_roles:
+            raise serializers.ValidationError(
+                {"role": f"You are not authorized to assign the role {target_role}."}
+            )
+
+        # An AOM_STAFF or MFI_ADMIN delegating a role must delegate it
+        # within their own organization -- not hand out access to some
+        # other AoM's MFI, or grant aom/donor-level access at all (that's
+        # SUPER_ADMIN's call).
+        if requester_role == "AOM_STAFF":
+            if attrs.get("aom") or attrs.get("donor"):
+                raise serializers.ValidationError(
+                    "AoM staff can only assign MFI-level roles, not AoM or donor access."
+                )
+            target_mfi = attrs.get("mfi") or getattr(self.instance, "mfi", None)
+            if not target_mfi or target_mfi.aom_id != requester.aom_id:
+                raise serializers.ValidationError(
+                    {"mfi": "You can only assign users to an MFI within your own AoM."}
+                )
+
+        if requester_role == "MFI_ADMIN":
+            if attrs.get("aom") or attrs.get("donor"):
+                raise serializers.ValidationError(
+                    "You are not authorized to assign AoM or donor access."
+                )
+            target_mfi = attrs.get("mfi") or getattr(self.instance, "mfi", None)
+            if not target_mfi or target_mfi.id != requester.mfi_id:
+                raise serializers.ValidationError(
+                    {"mfi": "You can only assign users to your own MFI."}
+                )
+
+        return attrs
+
     def create(self, validated_data):
         password = validated_data.pop("password", None)
         user = GlobalUser.objects.create_user(password=password, **validated_data)
@@ -299,9 +394,9 @@ class DonorContributionSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         donor = attrs.get("donor") or getattr(self.instance, "donor", None)
         aom = attrs.get("aom") or getattr(self.instance, "aom", None)
-        if donor and aom and aom.donor_id != donor.id:
+        if donor and aom and not aom.donors.filter(id=donor.id).exists():
             raise serializers.ValidationError(
-                "This AoM's sponsoring donor does not match the selected donor."
+                "This donor does not fund the selected AoM."
             )
         return attrs
 

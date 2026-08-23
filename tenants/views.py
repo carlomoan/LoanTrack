@@ -4,6 +4,7 @@ from calendar import monthrange
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
+import requests
 from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Count, F, Sum
@@ -17,6 +18,7 @@ from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 try:
     from django_filters.rest_framework import DjangoFilterBackend
@@ -78,6 +80,8 @@ from core.permissions import (
     AOM_STAFF,
     DONOR_STAFF,
     LOAN_OFFICER,
+    MFI_ADMIN,
+    MFI_MANAGER,
     MFI_WRITE_ROLES,
     SUPER_ADMIN,
     get_role,
@@ -288,6 +292,55 @@ def build_portfolio_payload():
             }
         )
 
+    # Individual-loan interest tracking. RepaymentSchedule already splits
+    # each installment into expected_principal/expected_interest/
+    # actual_paid, same shape as the wholesale MFIDisbursementRepayment
+    # schedule one tier up -- this aggregates that into a portfolio-wide
+    # view of how much interest was actually expected vs collected, and
+    # classifies closed loans as repaid-with-interest or
+    # repaid-with-interest-waived (via a LoanAdjustment of type
+    # INTEREST_WAIVER, the same mechanism used for a real waiver
+    # decision elsewhere in the app).
+    interest_aggregates = RepaymentSchedule.objects.filter(
+        loan__is_deleted=False
+    ).aggregate(
+        expected_interest=Sum("expected_interest"),
+        expected_principal=Sum("expected_principal"),
+    )
+
+    # actual_paid isn't split principal-vs-interest per installment, so
+    # interest collected is derived per-loan: whatever was paid beyond
+    # the loan's own principal counts as interest collected, capped at
+    # what was actually expected.
+    principal_collected_total = Decimal("0")
+    interest_collected_total = Decimal("0")
+
+    closed_loan_ids_with_waiver = set(
+        LoanAdjustment.objects.filter(
+            loan__status=Loan.LoanStatus.CLOSED,
+            loan__is_deleted=False,
+            adjustment_type=LoanAdjustment.AdjustmentType.INTEREST_WAIVER,
+        ).values_list("loan_id", flat=True)
+    )
+
+    closed_loans = loans.filter(status=Loan.LoanStatus.CLOSED).only(
+        "id", "loan_amount", "repaid_amount"
+    )
+
+    repaid_with_interest_count = 0
+    repaid_interest_waived_count = 0
+
+    for loan in closed_loans:
+        principal = loan.loan_amount or Decimal("0")
+        repaid = loan.repaid_amount or Decimal("0")
+        principal_collected_total += min(principal, repaid)
+        interest_collected_total += max(Decimal("0"), repaid - principal)
+
+        if loan.id in closed_loan_ids_with_waiver:
+            repaid_interest_waived_count += 1
+        else:
+            repaid_with_interest_count += 1
+
     return {
         "portfolio": {
             "total_loans": aggregates["total_loans"] or 0,
@@ -297,6 +350,16 @@ def build_portfolio_payload():
             "active_count": active_count,
         },
         "status_breakdown": status_breakdown,
+        "interest_repayment_breakdown": {
+            "closed_loans_total": len(closed_loans),
+            "repaid_with_interest_count": repaid_with_interest_count,
+            "repaid_interest_waived_count": repaid_interest_waived_count,
+            "principal_collected": safe_float(principal_collected_total),
+            "interest_collected": safe_float(interest_collected_total),
+            "interest_expected_portfolio_wide": safe_float(
+                interest_aggregates["expected_interest"]
+            ),
+        },
         "product_breakdown": product_breakdown,
         "gender_distribution": gender_distribution,
         "borrower_type_distribution": borrower_type_distribution,
@@ -602,6 +665,216 @@ class TenantViewSetMixin:
 # =============================================================================
 
 
+class GeocodeReverseView(TenantViewSetMixin, APIView):
+    """
+    GET /api/tenant/geocode/reverse/?lat=<lat>&lng=<lng>
+
+    Resolves a map click to a Region/District/Ward/Street via OpenStreetMap's
+    Nominatim reverse-geocoding service, creating whichever levels of the
+    hierarchy don't already exist for this tenant (get_or_create at each
+    level, so re-clicking the same area never creates duplicates).
+
+    This is the backend half of "click a point on the map, the location
+    hierarchy gets filled in automatically" -- the frontend map component
+    calls this after a click and gets back ready-to-use Region/District/
+    Ward/Street records (with ids) to attach to a Branch or Member.
+
+    Note: Nominatim is a shared public service with a strict 1 request/
+    second usage policy and no uptime guarantee -- fine for development
+    and light use, but a production deployment taking real traffic on
+    this feature should move to a paid provider (Mapbox, Google, HERE)
+    or a self-hosted Nominatim instance instead.
+    """
+
+    def get(self, request):
+        lat = request.query_params.get("lat")
+        lng = request.query_params.get("lng")
+
+        if lat is None or lng is None:
+            return Response(
+                {"detail": "lat and lng query parameters are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            lat_f = float(lat)
+            lng_f = float(lng)
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "lat and lng must both be numbers."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not (-90 <= lat_f <= 90 and -180 <= lng_f <= 180):
+            return Response(
+                {"detail": "lat/lng are out of range."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            response = requests.get(
+                "https://nominatim.openstreetmap.org/reverse",
+                params={
+                    "format": "jsonv2",
+                    "lat": lat_f,
+                    "lon": lng_f,
+                    "addressdetails": 1,
+                    "zoom": 18,
+                },
+                headers={
+                    # Nominatim's usage policy requires a real
+                    # identifying User-Agent -- requests without one are
+                    # liable to be blocked.
+                    "User-Agent": "LoanTrack/1.0 (contact: support@loantrack.local)"
+                },
+                # Nominatim is a free shared service that can be slow under
+                # load; 8s was too tight in practice (read timeouts on
+                # perfectly valid lookups). (connect, read) tuple: fail fast
+                # if we can't connect at all, but give a slow response room.
+                timeout=(5, 20),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except requests.Timeout:
+            return Response(
+                {
+                    "detail": (
+                        "Reverse geocoding is taking too long right now. "
+                        "Try again, or enter the location manually."
+                    )
+                },
+                status=status.HTTP_504_GATEWAY_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            return Response(
+                {"detail": f"Reverse geocoding lookup failed: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        if "error" in payload:
+            return Response(
+                {"detail": "No address found for this location."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        address = payload.get("address", {})
+
+        # OSM's address tagging varies a lot by country/region -- these
+        # fall back through the fields Nominatim actually uses for
+        # Tanzanian addresses in practice, from broadest to narrowest.
+        #
+        # Dar es Salaam is the big special case: Nominatim tags it as
+        #   region: "Coastal Zone"     <- a *zone*, not the region users know
+        #   city: "Dar es Salaam"      <- the actual region (a city-region)
+        #   city_district: "Ilala Municipal"  <- the actual district/municipal
+        #   suburb/subward             <- ward-level names
+        # so "region" alone yields "Coastal Zone" and there is never a
+        # county/state_district tag -- which left district/ward/street empty
+        # for every Dar point. The chains below account for that shape.
+        region_name = (
+            address.get("state")
+            or address.get("region")
+            or address.get("city")
+        )
+        # A zone label like "Coastal Zone"/"Central Zone" isn't a region a
+        # member would recognize; prefer the city name when the state field
+        # holds one of those.
+        if region_name and "zone" in region_name.lower():
+            region_name = (
+                address.get("city")
+                or address.get("state_district")
+                or address.get("county")
+                or region_name
+            )
+
+        def _strip_municipal(name):
+            # Nominatim's city_district values carry an administrative suffix
+            # ("Ilala Municipal", "Ubungo Municipal Council"); store the bare
+            # district name users actually pick from ("Ilala", "Ubungo").
+            import re
+
+            return re.sub(
+                r"\s+(municipal|town|district)(\s+council\s*(office)?)?$",
+                "",
+                name,
+                flags=re.IGNORECASE,
+            ).strip()
+
+        district_name = (
+            address.get("county")
+            or address.get("state_district")
+            or address.get("district")
+            # Dar es Salaam's districts only ever appear as city_district.
+            or address.get("city_district")
+        )
+        if district_name:
+            district_name = _strip_municipal(district_name)
+
+        ward_name = (
+            address.get("subward")
+            or address.get("suburb")
+            or address.get("neighbourhood")
+            or address.get("city_district")
+            or address.get("quarter")
+            or address.get("town")
+            or address.get("village")
+            # City-region fallback: when the region itself is the city
+            # (Dar es Salaam), its wards are tagged at city level.
+            or address.get("city")
+        )
+        # Don't let the ward collapse to the same string as the region/district
+        # (e.g. both "Dar es Salaam") -- a null ward beats a duplicate one.
+        if ward_name and ward_name in {region_name, district_name}:
+            ward_name = None
+        street_name = address.get("road")
+
+        if not region_name:
+            return Response(
+                {
+                    "detail": (
+                        "Could not determine a region for this location. "
+                        "Try a point closer to a named place."
+                    ),
+                    "raw_address": address,
+                },
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+
+        region, _ = Region.objects.get_or_create(name=region_name)
+
+        district = None
+        if district_name:
+            district, _ = District.objects.get_or_create(
+                region=region, name=district_name
+            )
+
+        ward = None
+        if district and ward_name:
+            ward, _ = Ward.objects.get_or_create(
+                district=district,
+                name=ward_name,
+                defaults={"geo_type": Ward.GeoType.URBAN},
+            )
+
+        street = None
+        if ward and street_name:
+            street, _ = Street.objects.get_or_create(ward=ward, name=street_name)
+
+        def _serialize(obj):
+            return {"id": obj.id, "name": obj.name} if obj else None
+
+        return Response(
+            {
+                "coordinates": {"lat": lat_f, "lng": lng_f},
+                "display_name": payload.get("display_name"),
+                "region": _serialize(region),
+                "district": _serialize(district),
+                "ward": _serialize(ward),
+                "street": _serialize(street),
+            }
+        )
+
+
 class RegionViewSet(TenantViewSetMixin, viewsets.ModelViewSet):
     serializer_class = RegionSerializer
 
@@ -827,6 +1100,102 @@ class LoanViewSet(TenantViewSetMixin, viewsets.ModelViewSet):
             }
         )
 
+    @action(detail=True, methods=["post"], url_path="approve")
+    def approve(self, request, pk=None):
+        """
+        Approve a pending loan (PND -> ACT). Separation of duty: MFI_ADMIN /
+        MFI_MANAGER / SUPER_ADMIN approve; the LOAN_OFFICER who created the
+        loan cannot approve their own.
+        """
+        role = get_role(request)
+
+        if role not in (SUPER_ADMIN, MFI_ADMIN, MFI_MANAGER):
+            raise exceptions.PermissionDenied(
+                "Only MFI admins and managers can approve loans."
+            )
+
+        with transaction.atomic():
+            # Lock via a plain query: get_queryset() carries select_related
+            # LEFT OUTER JOINs on nullable FKs, and Postgres refuses
+            # SELECT ... FOR UPDATE across outer joins.
+            loan = Loan.objects.select_for_update().get(pk=pk)
+
+            if loan.status != Loan.LoanStatus.PENDING:
+                return Response(
+                    {"detail": "Only pending loans can be approved."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            loan.status = Loan.LoanStatus.ACTIVE
+            loan.save()
+
+        return Response(self.get_serializer(loan).data)
+
+    @action(detail=True, methods=["post"], url_path="close")
+    def close(self, request, pk=None):
+        """
+        Close a loan (ACT -> CLS). Only allowed once the loan is fully
+        repaid -- closing early would hide real outstanding debt.
+        """
+        role = get_role(request)
+
+        if role not in (SUPER_ADMIN, MFI_ADMIN, MFI_MANAGER):
+            raise exceptions.PermissionDenied(
+                "Only MFI admins and managers can close loans."
+            )
+
+        with transaction.atomic():
+            loan = Loan.objects.select_for_update().get(pk=pk)
+
+            if loan.status != Loan.LoanStatus.ACTIVE:
+                return Response(
+                    {"detail": "Only active loans can be closed."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if (loan.outstanding_amount or Decimal("0")) > Decimal("0"):
+                return Response(
+                    {
+                        "detail": (
+                            f"Loan still has {loan.outstanding_amount} "
+                            "outstanding and cannot be closed."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            loan.status = Loan.LoanStatus.CLOSED
+            loan.save()
+
+        return Response(self.get_serializer(loan).data)
+
+    @action(detail=True, methods=["post"], url_path="mark_defaulted")
+    def mark_defaulted(self, request, pk=None):
+        """
+        Flag an active loan as defaulted (ACT -> DEF). Admin decision,
+        recorded against the loan's history trail.
+        """
+        role = get_role(request)
+
+        if role not in (SUPER_ADMIN, MFI_ADMIN, MFI_MANAGER):
+            raise exceptions.PermissionDenied(
+                "Only MFI admins and managers can flag defaults."
+            )
+
+        with transaction.atomic():
+            loan = Loan.objects.select_for_update().get(pk=pk)
+
+            if loan.status != Loan.LoanStatus.ACTIVE:
+                return Response(
+                    {"detail": "Only active loans can be marked as defaulted."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            loan.status = Loan.LoanStatus.DEFAULTED
+            loan.save()
+
+        return Response(self.get_serializer(loan).data)
+
     @action(detail=True, methods=["post"], url_path="soft_delete")
     def soft_delete(self, request, pk=None):
         loan = self.get_object()
@@ -996,7 +1365,7 @@ class RepaymentScheduleViewSet(TenantViewSetMixin, viewsets.ModelViewSet):
             )
 
         with transaction.atomic():
-            schedule = self.get_queryset().select_for_update().get(pk=pk)
+            schedule = RepaymentSchedule.objects.select_for_update().get(pk=pk)
             loan = Loan.objects.select_for_update().get(pk=schedule.loan_id)
 
             schedule.actual_paid = (
@@ -1052,11 +1421,46 @@ class LoanAdjustmentViewSet(TenantViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="approve")
     def approve(self, request, pk=None):
         with transaction.atomic():
-            adjustment = self.get_queryset().select_for_update().get(pk=pk)
+            adjustment = LoanAdjustment.objects.select_for_update().get(pk=pk)
+
+            if adjustment.is_approved:
+                return Response(
+                    {"detail": "This adjustment is already approved."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             adjustment.is_approved = True
             adjustment.approved_by = request.user
             adjustment.approved_at = timezone.now()
+            adjustment.save()
+
+        return Response(self.get_serializer(adjustment).data)
+
+    @action(detail=True, methods=["post"], url_path="reject")
+    def reject(self, request, pk=None):
+        """
+        Reject a pending adjustment. The record is kept (with who rejected
+        it and why) rather than deleted, so the audit trail shows the full
+        decision -- not just the ones that were approved.
+        """
+        reason = str(request.data.get("reason", "")).strip()
+
+        with transaction.atomic():
+            adjustment = LoanAdjustment.objects.select_for_update().get(pk=pk)
+
+            if adjustment.is_approved:
+                return Response(
+                    {"detail": "An approved adjustment cannot be rejected."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            adjustment.is_approved = False
+            adjustment.approved_by = request.user
+            adjustment.approved_at = timezone.now()
+            adjustment.reason = (
+                f"{adjustment.reason}\n[REJECTED: {reason}]" if reason
+                else f"{adjustment.reason}\n[REJECTED]"
+            ).strip()
             adjustment.save()
 
         return Response(self.get_serializer(adjustment).data)
@@ -1147,6 +1551,102 @@ class TenantReportViewSet(TenantViewSetMixin, viewsets.ViewSet):
 # =============================================================================
 
 
+class ActivityViewSet(TenantViewSetMixin, viewsets.ViewSet):
+    """
+    Read-only audit trail: who changed what, and when, across the
+    operational models MFI staff actually care about day to day (Loan,
+    Member, LoanAdjustment, Branch). Every one of these already has
+    django-simple-history tracking every save -- this just makes that
+    visible instead of leaving it as data nobody can see.
+
+    Not a full generic history browser (that would cover every tenant
+    model); scoped to the models where "who changed this and when"
+    matters most for a financial system's day-to-day trust.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    TRACKED_MODELS = [
+        ("Loan", Loan, "loan_number"),
+        ("Member", Member, "name"),
+        ("LoanAdjustment", LoanAdjustment, None),
+        ("Branch", Branch, "name"),
+    ]
+
+    CHANGE_TYPE_LABELS = {"+": "created", "~": "changed", "-": "deleted"}
+
+    def list(self, request):
+        try:
+            page = max(1, int(request.query_params.get("page", 1)))
+        except ValueError:
+            page = 1
+        try:
+            page_size = min(100, max(1, int(request.query_params.get("page_size", 25))))
+        except ValueError:
+            page_size = 25
+
+        # Pull a generous slice from each tracked model's history table,
+        # merge, and sort once in Python -- a real cross-table UNION
+        # ordered by date isn't practical here since each historical
+        # model is a distinct table with its own columns. Bounded by
+        # FETCH_PER_MODEL so this stays cheap even with a lot of history.
+        FETCH_PER_MODEL = 200
+        merged = []
+
+        for model_name, model_cls, repr_field in self.TRACKED_MODELS:
+            history_qs = (
+                model_cls.history.select_related("history_user")
+                .order_by("-history_date")[:FETCH_PER_MODEL]
+            )
+            for record in history_qs:
+                label = (
+                    getattr(record, repr_field, None)
+                    if repr_field
+                    else None
+                ) or str(record)
+
+                changed_fields = []
+                if record.history_type == "~":
+                    prev = record.prev_record
+                    if prev is not None:
+                        diff = record.diff_against(prev)
+                        changed_fields = [c.field for c in diff.changes]
+
+                merged.append(
+                    {
+                        "history_id": record.history_id,
+                        "model": model_name,
+                        "object_id": record.id,
+                        "object_repr": label,
+                        "change_type": self.CHANGE_TYPE_LABELS.get(
+                            record.history_type, record.history_type
+                        ),
+                        "changed_by": (
+                            record.history_user.username
+                            if record.history_user_id
+                            else None
+                        ),
+                        "changed_at": record.history_date,
+                        "changed_fields": changed_fields,
+                    }
+                )
+
+        merged.sort(key=lambda row: row["changed_at"], reverse=True)
+
+        total = len(merged)
+        start = (page - 1) * page_size
+        page_items = merged[start : start + page_size]
+
+        return Response(
+            {
+                "count": total,
+                "page": page,
+                "page_size": page_size,
+                "results": page_items,
+            }
+        )
+
+
 class CrossTenantReportViewSet(viewsets.ViewSet):
     """
     Reads and generates consolidated reports across MFI/AoM/Donor
@@ -1179,7 +1679,7 @@ class CrossTenantReportViewSet(viewsets.ViewSet):
 
                 queryset = queryset.filter(
                     Q(mfi__donor_id=request.user.donor_id)
-                    | Q(mfi__aom__donor_id=request.user.donor_id)
+                    | Q(mfi__aom__donors=request.user.donor_id)
                 )
             elif role in MFI_WRITE_ROLES or role == LOAN_OFFICER:
                 queryset = queryset.filter(mfi_id=request.user.mfi_id)
@@ -1306,10 +1806,10 @@ class CrossTenantReportViewSet(viewsets.ViewSet):
         with schema_context(get_public_schema_name()):
             aom_reports = (
                 AoMReport.objects.filter(
-                    aom__donor_id=donor_id,
+                    aom__donors=donor_id,
                     period=period_date,
                 )
-                .select_related("aom", "aom__donor")
+                .select_related("aom").prefetch_related("aom__donors")
                 .order_by("aom__name")
             )
 

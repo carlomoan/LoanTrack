@@ -2,9 +2,11 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
+    ActivityViewSet,
     BranchViewSet,
     CrossTenantReportViewSet,
     DistrictViewSet,
+    GeocodeReverseView,
     LoanAdjustmentViewSet,
     LoanDocumentViewSet,
     LoanOfficerViewSet,
@@ -48,6 +50,7 @@ router.register(
 )
 
 router.register(r"reports", TenantReportViewSet, basename="report")
+router.register(r"activity", ActivityViewSet, basename="activity")
 
 
 # Cross-tenant/public reporting endpoints
@@ -62,4 +65,5 @@ cross_router.register(
 urlpatterns = [
     path("", include(router.urls)),
     path("public/", include(cross_router.urls)),
+    path("geocode/reverse/", GeocodeReverseView.as_view(), name="geocode-reverse"),
 ]

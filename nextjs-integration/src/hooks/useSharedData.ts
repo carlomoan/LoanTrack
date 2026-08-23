@@ -329,6 +329,17 @@ export const useUpdateUser = () => {
   });
 };
 
+export const useDeleteUser = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (id: number) => sharedApi.users.delete(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['shared', 'users'] });
+    },
+  });
+};
+
 // =============================================================================
 // Exchange Rates
 // =============================================================================
@@ -566,3 +577,15 @@ export const useRecordDisbursementPayment = () => {
     },
   });
 };
+
+// =============================================================================
+// Notifications
+// =============================================================================
+
+export const useNotifications = () =>
+  useQuery({
+    queryKey: ['shared', 'notifications'],
+    queryFn: async () => (await sharedApi.notifications.summary()).data,
+    staleTime: 60 * 1000,
+    refetchInterval: 60 * 1000, // real polling, not a one-time fetch on mount
+  });

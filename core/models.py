@@ -15,6 +15,38 @@ def first_day_of_month_validator(value):
         raise ValidationError(_("Period must be the first day of the month."))
 
 
+class SystemSetting(models.Model):
+    """
+    Singleton key/value store for system-wide configuration.
+
+    Currently holds the default display currency (TZS for Tanzania).
+    Only SUPER_ADMINs may change these values; every other role reads
+    them so the UI formats money consistently across the app.
+    """
+
+    key = models.CharField(max_length=100, unique=True, db_index=True)
+    value = models.CharField(max_length=255, blank=True)
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "core_systemsetting"
+
+    def __str__(self) -> str:
+        return f"{self.key}={self.value}"
+
+    @classmethod
+    def get(cls, key: str, default: str = "") -> str:
+        return getattr(
+            cls.objects.filter(key=key).first(), "value", default
+        )
+
+    @classmethod
+    def set(cls, key: str, value: str) -> "SystemSetting":
+        obj, _ = cls.objects.update_or_create(key=key, defaults={"value": value})
+        return obj
+
+
 class Donor(models.Model):
     name = models.CharField(max_length=255, unique=True, db_index=True)
     contact_email = models.EmailField()
@@ -39,10 +71,11 @@ class AoM(models.Model):
     name = models.CharField(max_length=255, unique=True)
     code = models.CharField(max_length=20, unique=True, db_index=True)
 
-    donor = models.ForeignKey(
+    # There is a single AoM in this deployment, funded by many donors --
+    # so this is many-to-many, not a single sponsoring-donor FK. The
+    # per-donation money trail lives in DonorContribution (donor -> AoM).
+    donors = models.ManyToManyField(
         Donor,
-        on_delete=models.SET_NULL,
-        null=True,
         blank=True,
         related_name="aoms",
     )
@@ -403,8 +436,10 @@ class MFIReport(models.Model):
         if not self.base_currency and self.mfi_id:
             if self.mfi.donor:
                 self.base_currency = self.mfi.donor.base_currency
-            elif self.mfi.aom and self.mfi.aom.donor:
-                self.base_currency = self.mfi.aom.donor.base_currency
+            elif self.mfi.aom:
+                first_donor = self.mfi.aom.donors.first()
+                if first_donor:
+                    self.base_currency = first_donor.base_currency
 
         super().save(*args, **kwargs)
 
@@ -483,8 +518,9 @@ class AoMReport(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.base_currency and self.aom_id:
-            if self.aom.donor:
-                self.base_currency = self.aom.donor.base_currency
+            first_donor = self.aom.donors.first() if self.aom_id else None
+            if first_donor:
+                self.base_currency = first_donor.base_currency
 
         super().save(*args, **kwargs)
 
@@ -641,9 +677,11 @@ class DonorContribution(models.Model):
     def clean(self):
         # A donor can only fund an AoM it actually sponsors -- otherwise
         # this record wouldn't reconcile against anything.
-        if self.aom_id and self.donor_id and self.aom.donor_id != self.donor_id:
+        if self.aom_id and self.donor_id and not self.aom.donors.filter(
+            id=self.donor_id
+        ).exists():
             raise ValidationError(
-                "This AoM's sponsoring donor does not match the selected donor."
+                "This donor does not fund the selected AoM."
             )
 
 

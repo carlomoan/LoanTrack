@@ -3,7 +3,8 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
-import { Building2, Landmark, HeartHandshake, Plus, LogIn, HandCoins, Wallet } from 'lucide-react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { Building2, Landmark, HeartHandshake, Plus, LogIn, HandCoins, Wallet, Wrench } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -11,16 +12,18 @@ import { Badge } from '@/components/ui/badge';
 import {
   useDonors, useCreateDonor,
   useAoMs, useCreateAoM,
-  useMFIs, useCreateMFI,
+  useMFIs, useCreateMFI, useCreateMFISchema,
   useDonorContributions, useCreateDonorContribution,
   useMFIDisbursements, useCreateMFIDisbursement, useGenerateDisbursementSchedule,
 } from '@/hooks/useSharedData';
+import { sharedApi } from '@/api/shared';
 import { useAuthStore } from '@/hooks/useAuthStore';
 import { useTenantContext } from '@/hooks/useTenantContext';
 import {
   canEditAom, canEditDonor, canEditMfi,
   canManageDonorContributions, canViewDonorContributions,
   canManageDisbursements, canViewDisbursements,
+  isSuperAdmin,
 } from '@/lib/permissions';
 import type { AoM, Donor, DonorContribution, MFI, MFIDisbursement } from '@/types';
 
@@ -59,7 +62,7 @@ export default function OrganizationsPage() {
             onClick={() => setTab(t.id)}
             className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
               tab === t.id
-                ? 'border-indigo-600 text-indigo-600'
+                ? 'border-violet-600 text-violet-600'
                 : 'border-transparent text-slate-500 hover:text-slate-700'
             }`}
           >
@@ -154,6 +157,67 @@ function DonorsTab({ canEdit }: { canEdit: boolean }) {
 // =============================================================================
 // AoMs
 // =============================================================================
+
+/** SUPER_ADMIN-only: move an MFI under this AoM. */
+function AssignMfiButton({ aom }: { aom: AoM }) {
+  const queryClient = useQueryClient();
+  const { data: mfis } = useMFIs();
+  const [open, setOpen] = useState(false);
+  const [mfiId, setMfiId] = useState('');
+
+  const assign = useMutation({
+    mutationFn: (id: number) => sharedApi.aoms.assignMfi(aom.id, id),
+    onSuccess: (res) => {
+      toast.success(res.data.detail || 'MFI assigned');
+      queryClient.invalidateQueries({ queryKey: ['shared', 'aoms'] });
+      queryClient.invalidateQueries({ queryKey: ['shared', 'mfis'] });
+      setOpen(false);
+      setMfiId('');
+    },
+    onError: () => toast.error('Failed to assign MFI'),
+  });
+
+  // MFIs already under this AoM aren't candidates.
+  const candidates = (mfis?.results ?? []).filter(
+    (m: MFI) => !aom.mfi_ids?.includes(m.id)
+  );
+
+  return (
+    <>
+      <Button size="sm" variant="outline" onClick={() => setOpen((v) => !v)}>
+        Assign MFI
+      </Button>
+      {open && (
+        <div className="w-full mt-3 pt-3 border-t border-slate-100 flex items-center gap-2 flex-wrap">
+          <select
+            className="px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg"
+            value={mfiId}
+            onChange={(e) => setMfiId(e.target.value)}
+          >
+            <option value="">Select MFI to assign...</option>
+            {candidates.map((m: MFI) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+                {m.aom_name ? ` (currently: ${m.aom_name})` : ''}
+              </option>
+            ))}
+          </select>
+          <Button
+            size="sm"
+            onClick={() => mfiId && assign.mutate(Number(mfiId))}
+            disabled={!mfiId || assign.isPending}
+          >
+            {assign.isPending ? 'Assigning...' : 'Assign'}
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+        </div>
+      )}
+    </>
+  );
+}
+
 function AoMsTab({ canEdit }: { canEdit: boolean }) {
   const { data, isLoading } = useAoMs();
   const { data: donors } = useDonors();
@@ -162,7 +226,7 @@ function AoMsTab({ canEdit }: { canEdit: boolean }) {
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
   const [email, setEmail] = useState('');
-  const [donorId, setDonorId] = useState<string>('');
+  const [donorIds, setDonorIds] = useState<string[]>([]);
 
   const handleCreate = async () => {
     if (!name || !code || !email) {
@@ -174,13 +238,13 @@ function AoMsTab({ canEdit }: { canEdit: boolean }) {
         name,
         code,
         contact_email: email,
-        donor: donorId ? Number(donorId) : null,
+        donors: donorIds.map(Number),
       });
       toast.success('AoM created');
       setName('');
       setCode('');
       setEmail('');
-      setDonorId('');
+      setDonorIds([]);
       setShowForm(false);
     } catch {
       toast.error('Failed to create AoM');
@@ -204,15 +268,18 @@ function AoMsTab({ canEdit }: { canEdit: boolean }) {
             <Input placeholder="Code (e.g. AOM1)" value={code} onChange={(e) => setCode(e.target.value)} />
             <Input placeholder="Contact email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
             <select
-              className="px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg"
-              value={donorId}
-              onChange={(e) => setDonorId(e.target.value)}
+              multiple
+              className="px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg col-span-2 h-24"
+              value={donorIds}
+              onChange={(e) => setDonorIds(Array.from(e.target.selectedOptions, (o) => o.value))}
             >
-              <option value="">No parent donor</option>
               {donors?.results?.map((d: Donor) => (
                 <option key={d.id} value={d.id}>{d.name}</option>
               ))}
             </select>
+            <p className="text-xs text-slate-400 col-span-2 -mt-2">
+              Hold Ctrl/Cmd to select multiple donors — an AoM can be funded by many donors.
+            </p>
             <div className="col-span-2">
               <Button size="sm" onClick={handleCreate} disabled={createAoM.isPending}>
                 {createAoM.isPending ? 'Saving...' : 'Save AoM'}
@@ -230,12 +297,19 @@ function AoMsTab({ canEdit }: { canEdit: boolean }) {
         <div className="grid gap-3">
           {data?.results?.map((aom: AoM) => (
             <Card key={aom.id}>
-              <CardContent className="pt-6 flex items-center justify-between">
-                <div>
-                  <p className="font-medium text-slate-900">{aom.name} <span className="text-slate-400 font-normal">({aom.code})</span></p>
-                  <p className="text-sm text-slate-500">{aom.donor_name || 'No donor'}</p>
+              <CardContent className="pt-6">
+                <div className="flex items-start justify-between gap-4 flex-wrap">
+                  <div>
+                    <p className="font-medium text-slate-900">{aom.name} <span className="text-slate-400 font-normal">({aom.code})</span></p>
+                    <p className="text-sm text-slate-500 mt-0.5">
+                      Donors: {aom.donor_names?.length ? aom.donor_names.join(', ') : 'None yet'}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Badge variant="secondary">{aom.mfi_count ?? 0} MFIs</Badge>
+                    {canEdit && <AssignMfiButton aom={aom} />}
+                  </div>
                 </div>
-                <Badge variant="secondary">{aom.mfi_count ?? 0} MFIs</Badge>
               </CardContent>
             </Card>
           ))}
@@ -253,7 +327,9 @@ function MFIsTab({ canEdit }: { canEdit: boolean }) {
   const { data, isLoading } = useMFIs();
   const { data: aoms } = useAoMs();
   const createMFI = useCreateMFI();
+  const createSchema = useCreateMFISchema();
   const setSelectedMfi = useTenantContext((state) => state.setSelectedMfi);
+  const user = useAuthStore((state) => state.user);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({
     name: '', registration_number: '', email: '', phone: '', address: '', aomId: '',
@@ -352,6 +428,25 @@ function MFIsTab({ canEdit }: { canEdit: boolean }) {
                   <Badge variant={mfi.is_active ? 'success' : 'secondary'}>
                     {mfi.is_active ? 'Active' : 'Inactive'}
                   </Badge>
+                  {isSuperAdmin(user) && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={createSchema.isPending}
+                      onClick={async () => {
+                        try {
+                          await createSchema.mutateAsync(mfi.id);
+                          toast.success(
+                            `${mfi.name}: schema, domain, and default data verified/repaired.`
+                          );
+                        } catch {
+                          toast.error('Repair failed — check server logs.');
+                        }
+                      }}
+                    >
+                      <Wrench className="h-3.5 w-3.5 mr-1" /> Repair
+                    </Button>
+                  )}
                   <Button size="sm" variant="outline" onClick={() => enterTenant(mfi)}>
                     <LogIn className="h-3.5 w-3.5 mr-1" /> Enter
                   </Button>
@@ -476,6 +571,7 @@ function ContributionsTab({ canEdit }: { canEdit: boolean }) {
 // MFI Disbursements
 // =============================================================================
 function DisbursementsTab({ canEdit }: { canEdit: boolean }) {
+  const router = useRouter();
   const { data, isLoading } = useMFIDisbursements();
   const { data: aoms } = useAoMs();
   const { data: mfis } = useMFIs();
@@ -485,6 +581,14 @@ function DisbursementsTab({ canEdit }: { canEdit: boolean }) {
   const [form, setForm] = useState({
     aomId: '', mfiId: '', principal: '', rate: '', term: '', date: '',
   });
+
+  // Only MFIs that actually belong to the selected AoM are valid choices --
+  // the backend rejects anything else with "This MFI does not belong to the
+  // selected AoM", so the form cascades instead of letting you get there.
+  const selectedAom = aoms?.results?.find((a: AoM) => String(a.id) === form.aomId);
+  const eligibleMfis = selectedAom?.mfi_ids
+    ? (mfis?.results ?? []).filter((m: MFI) => selectedAom.mfi_ids!.includes(m.id))
+    : [];
 
   const handleCreate = async () => {
     if (!form.aomId || !form.mfiId || !form.principal || !form.rate || !form.term || !form.date) {
@@ -537,7 +641,10 @@ function DisbursementsTab({ canEdit }: { canEdit: boolean }) {
             <select
               className="px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg"
               value={form.aomId}
-              onChange={(e) => setForm({ ...form, aomId: e.target.value })}
+              onChange={(e) => {
+                // Changing the AoM invalidates a previously-picked MFI.
+                setForm({ ...form, aomId: e.target.value, mfiId: '' });
+              }}
             >
               <option value="">Select AoM</option>
               {aoms?.results?.map((a: AoM) => (
@@ -548,9 +655,12 @@ function DisbursementsTab({ canEdit }: { canEdit: boolean }) {
               className="px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg"
               value={form.mfiId}
               onChange={(e) => setForm({ ...form, mfiId: e.target.value })}
+              disabled={!form.aomId}
             >
-              <option value="">Select MFI</option>
-              {mfis?.results?.map((m: MFI) => (
+              <option value="">
+                {form.aomId ? 'Select MFI' : 'Select an AoM first'}
+              </option>
+              {eligibleMfis.map((m: MFI) => (
                 <option key={m.id} value={m.id}>{m.name}</option>
               ))}
             </select>
@@ -603,6 +713,15 @@ function DisbursementsTab({ canEdit }: { canEdit: boolean }) {
                       Generate Schedule
                     </Button>
                   )}
+                  {d.status !== 'PND' && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => router.push(`/dashboard/organizations/disbursements/${d.id}`)}
+                    >
+                      View Schedule
+                    </Button>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -616,7 +735,7 @@ function DisbursementsTab({ canEdit }: { canEdit: boolean }) {
 function LoadingState() {
   return (
     <div className="text-center py-8">
-      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto"></div>
+      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-violet-600 mx-auto"></div>
     </div>
   );
 }

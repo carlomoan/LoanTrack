@@ -9,6 +9,14 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 // resolveTenantSubdomain below), never guessed or hardcoded.
 const TENANT_SUBDOMAIN_OVERRIDE = process.env.NEXT_PUBLIC_TENANT_SUBDOMAIN || '';
 
+// Dev only: used when running on localhost with no tenant selected yet (e.g.
+// a SUPER_ADMIN who hasn't drilled into an MFI). Tenant endpoints 400 without
+// an X-Tenant-Subdomain header, so without this fallback those screens are
+// unusable in local development. Point this at a real MFI schema_name that
+// exists in your DB (see setup_tenants.py) -- production should leave it unset
+// and rely on hostname/tenant-context resolution.
+const DEV_DEFAULT_TENANT = process.env.NEXT_PUBLIC_DEV_DEFAULT_TENANT || 'testmfi';
+
 export const api: AxiosInstance = axios.create({
   baseURL: `${API_BASE_URL}/api`,
   headers: { 'Content-Type': 'application/json' },
@@ -104,7 +112,9 @@ const resolveTenantSubdomain = (): string => {
 
   // Not logged in yet, or no tenant selected. Fall back to a subdomain
   // parsed from the hostname, for production multi-tenant domains like
-  // mfi-alpha.loantrack.example.com.
+  // mfi-alpha.loantrack.example.com. In local development the hostname is
+  // "localhost", which yields nothing useful -- fall back to a default dev
+  // tenant so tenant endpoints return data instead of 400ing.
   if (typeof window !== 'undefined') {
     const hostname = window.location.hostname;
     if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
@@ -112,6 +122,8 @@ const resolveTenantSubdomain = (): string => {
       if (parts.length > 1 && !['www', 'app'].includes(parts[0])) {
         return parts[0];
       }
+    } else if (DEV_DEFAULT_TENANT) {
+      return DEV_DEFAULT_TENANT;
     }
   }
 

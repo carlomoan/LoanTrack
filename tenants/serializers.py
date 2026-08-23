@@ -134,6 +134,13 @@ class MemberSerializer(serializers.ModelSerializer):
         default=None,
     )
 
+    # Required+unique at the model level, but it's internal bookkeeping --
+    # create() generates one when the client omits it. Declaring the field
+    # explicitly (rather than relying on ModelSerializer's inference) is what
+    # lets validation pass without it; without this, DRF rejects the request
+    # with "member_id: This field is required" before create() ever runs.
+    member_id = serializers.CharField(required=False)
+
     street_name = serializers.CharField(source="street.name", read_only=True, default=None)
     ward_name = serializers.CharField(
         source="street.ward.name",
@@ -171,6 +178,33 @@ class MemberSerializer(serializers.ModelSerializer):
         model = Member
         fields = "__all__"
         read_only_fields = ["created_at", "updated_at"]
+
+    def validate_national_id(self, value):
+        # NIDA is optional: an omitted/empty value must store as "" (the
+        # column is NOT NULL), never None -- sending null from a client
+        # would otherwise 400 on a field the UI marks optional.
+        return (value or "").strip()
+
+    def create(self, validated_data):
+        # member_id is unique and required at the model level, but it's
+        # internal bookkeeping -- generate it when the client doesn't send
+        # one so the creation form doesn't have to.
+        if not validated_data.get("member_id"):
+            validated_data["member_id"] = self._generate_member_id()
+        return super().create(validated_data)
+
+    def _generate_member_id(self):
+        import uuid
+
+        # Retry on the (vanishingly unlikely) unique collision rather than
+        # surfacing a 500 to the user for something entirely internal.
+        for _ in range(5):
+            candidate = f"MBR-{uuid.uuid4().hex[:8].upper()}"
+            if not Member.objects.filter(member_id=candidate).exists():
+                return candidate
+        raise serializers.ValidationError(
+            {"member_id": "Could not generate a unique member ID. Try again."}
+        )
 
 
 # =============================================================================
